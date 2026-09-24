@@ -66,8 +66,13 @@ export default function IssuerPortal() {
   const [contractAuthorizedIssuer, setContractAuthorizedIssuer] = useState<string | null>(null);
   const [isConnectingWallet, setIsConnectingWallet] = useState(false);
   const [isCheckingIssuer, setIsCheckingIssuer] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   const contractConfigured = isContractConfigured();
   const isCorrectNetwork = walletChainId === SEPOLIA_CHAIN_ID;
@@ -436,7 +441,7 @@ export default function IssuerPortal() {
         </div>
 
         {/* Missing MetaMask Notification */}
-        {!isMetaMaskInstalled() && (
+        {isMounted && !isMetaMaskInstalled() && (
           <div className="p-3.5 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 rounded-xl text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2">
             <span>🦊</span>
             <div>
