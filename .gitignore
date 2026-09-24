@@ -141,3 +141,16 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Hardhat Build Artifacts, Cache, and Ignition Deployments
+artifacts/
+cache/
+ignition/deployments/
+
+# Hardhat Keystore, Wallets, and Credentials
+.hardhat/
+keystore/
+*.keystore
+*.key
+*.secret
+

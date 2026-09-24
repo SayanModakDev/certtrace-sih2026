@@ -29,3 +29,14 @@
 
 # Snapshot cheatcodes output
 /snapshots
+
+# Hardhat Ignition deployment-state directories
+/ignition/deployments/
+
+# Hardhat Keystore, Wallets, and Credentials
+.hardhat/
+keystore/
+*.keystore
+*.key
+*.secret
+
