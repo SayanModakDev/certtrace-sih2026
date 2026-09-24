@@ -176,7 +176,7 @@ export default function VerifierPortal() {
             </label>
             <div
               onClick={() => pdfInputRef.current?.click()}
-              className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-600 rounded-xl p-5 text-center cursor-pointer transition-colors bg-zinc-50/50 dark:bg-zinc-900/50 min-h-[140px] flex flex-col justify-center items-center"
+              className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-600 rounded-xl p-5 text-center cursor-pointer transition-colors bg-zinc-50/50 dark:bg-zinc-900/50 min-h-35 flex flex-col justify-center items-center"
             >
               <input
                 type="file"
@@ -215,7 +215,7 @@ export default function VerifierPortal() {
             </label>
             <div
               onClick={() => proofInputRef.current?.click()}
-              className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-600 rounded-xl p-5 text-center cursor-pointer transition-colors bg-zinc-50/50 dark:bg-zinc-900/50 min-h-[140px] flex flex-col justify-center items-center"
+              className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-600 rounded-xl p-5 text-center cursor-pointer transition-colors bg-zinc-50/50 dark:bg-zinc-900/50 min-h-35 flex flex-col justify-center items-center"
             >
               <input
                 type="file"

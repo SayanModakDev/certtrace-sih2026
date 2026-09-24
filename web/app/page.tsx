@@ -14,7 +14,7 @@ export default function Home() {
       <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-md sticky top-0 z-30">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-800 flex items-center justify-center text-white font-bold text-xl shadow-sm shadow-indigo-500/20">
+            <div className="w-10 h-10 rounded-xl bg-linear-to-br from-indigo-600 via-indigo-700 to-violet-800 flex items-center justify-center text-white font-bold text-xl shadow-sm shadow-indigo-500/20">
               CT
             </div>
             <div>
@@ -37,7 +37,7 @@ export default function Home() {
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
             <span className="text-zinc-600 dark:text-zinc-400">Sepolia (ID: {SEPOLIA_CHAIN_ID})</span>
             <span className="text-zinc-400 dark:text-zinc-600">|</span>
-            <span className="text-zinc-700 dark:text-zinc-300 truncate max-w-[130px] sm:max-w-[160px]" title={DEFAULT_CONTRACT_ADDRESS}>
+            <span className="text-zinc-700 dark:text-zinc-300 truncate max-w-32.5 sm:max-w-40" title={DEFAULT_CONTRACT_ADDRESS}>
               {DEFAULT_CONTRACT_ADDRESS.slice(0, 6)}...{DEFAULT_CONTRACT_ADDRESS.slice(-4)}
             </span>
           </div>
