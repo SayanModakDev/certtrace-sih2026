@@ -4,9 +4,9 @@ CertTrace is a decentralized academic certificate issuance and integrity verific
 
 ---
 
-## Smart Contract Deployment
+## Smart Contract Deployments
 
-The core `CertTrace` smart contract is deployed on the Ethereum Sepolia testnet.
+CertTrace uses two explicitly allowlisted Ethereum Sepolia deployments. V1 remains available for legacy verification; new issuance and revocation use V2.
 
 | Parameter | Value |
 |---|---|
@@ -14,15 +14,18 @@ The core `CertTrace` smart contract is deployed on the Ethereum Sepolia testnet.
 | **SIH Problem Statement** | SIH26194 |
 | **Network** | Ethereum Sepolia |
 | **Chain ID** | `11155111` |
-| **Contract Address** | [`0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca`](https://sepolia.etherscan.io/address/0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca) |
-| **Deployment Mechanism** | Hardhat Ignition (`ignition/modules/CertTrace.ts`) |
+| **V1 Contract** | [`0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca`](https://sepolia.etherscan.io/address/0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca) |
+| **V2 Contract** | [`0xF8bd01c81124c0a9008463b40dD0a1aFf7D9256a`](https://sepolia.etherscan.io/address/0xF8bd01c81124c0a9008463b40dD0a1aFf7D9256a) |
+| **Authorized Issuer** | `0x89CA83fB6Ed701549D6D40c404445fB4F06FB542` |
+| **V2 Deployment Transaction** | [`0xc7d440…ca7eb`](https://sepolia.etherscan.io/tx/0xc7d440198643fd35bf3c01e450ad79476f980387ad0b775a10da2cb0983ca7eb) |
+| **Deployment Mechanism** | Hardhat Ignition (`CertTrace.ts` and `CertTraceV2.ts`) |
 
 ### Deployment & Configuration Details
 
 - **Contract Deployment**: The `CertTrace.sol` contract was compiled with `solc 0.8.34` (optimizer enabled, 200 runs) and deployed to Ethereum Sepolia.
-- **Frontend Integration**: The Next.js frontend connects to the contract using the environment variable `NEXT_PUBLIC_CONTRACT_ADDRESS` (configured in `web/.env.local`).
+- **Frontend Integration**: The application uses `NEXT_PUBLIC_V1_CONTRACT_ADDRESS` and `NEXT_PUBLIC_V2_CONTRACT_ADDRESS` as a trusted allowlist. Proof files and QR URLs cannot introduce arbitrary contract or RPC targets.
 - **Read-Only Verification**: The Verifier Portal queries the Sepolia network using a standard JSON-RPC endpoint (`NEXT_PUBLIC_SEPOLIA_RPC_URL`, defaulting to a public Sepolia node) without requiring users to install MetaMask or connect a wallet.
-- **Credential Issuance**: Issuing a credential on-chain requires connecting the authorized issuer wallet via MetaMask and submitting an `issueCredential(bytes32,bytes32)` transaction on Sepolia.
+- **Credential Issuance and Revocation**: New V2 issuance and revocation require the authorized issuer wallet via MetaMask. The UI waits for a successful receipt and on-chain status read-back.
 
 > [!CAUTION]
 > **Security Notice**: Never commit wallet private keys, secret recovery phrases (mnemonics), local Hardhat keystore files, or production `.env.local` files to Git. Hardhat configuration variables (`hardhat vars`) and local `.gitignore` rules protect deployment secrets.
@@ -43,9 +46,9 @@ CertTrace implements the `CERTTRACE_V1` cryptographic scheme:
 ## Current Testing & Verification Baseline
 
 - **Smart Contract Test Suite**: 28 passing tests in `blockchain/` (8 Foundry/Solidity property and fuzz tests + 20 Mocha/Ethers.js integration tests).
-- **Frontend Test Suite**: 31 passing tests in `web/` covering hashing, commitment generation, proof creation/validation, blockchain verification, QR entry, and revocation-aware V2 verification.
+- **Frontend Test Suite**: 34 passing tests in `web/` covering hashing, commitment generation, proof creation/validation, trusted V1/V2 routing, QR entry, tamper detection, and revocation-aware V2 verification.
 - **Production Build**: Successfully compiled with Next.js 16.3.6 (Turbopack) and zero ESLint errors or warnings.
-- **Sepolia Status**: Contract deployed to Sepolia. Automated integration tests validate on-chain contract interfaces; live end-to-end user transactions are ready for Sepolia execution with funded issuer accounts.
+- **Sepolia Status**: V2 deployment, fictional issuance, original/modified document checks, authorized revocation, revoked-status verification, and legacy V1 verification have been exercised against real Sepolia.
 
 ---
 
@@ -55,70 +58,50 @@ After an issuance transaction is confirmed and read back from Sepolia, the Issue
 
 ```text
 https://<public-app-origin>/verify?id=<public-credential-id>
+https://<public-app-origin>/verify?id=<public-credential-id>&version=v2
 ```
 
-The QR does not contain PDF bytes, the proof JSON, salt, personal information, or wallet secrets. Opening it pre-populates the public credential ID, but never produces a successful result by itself. The verifier must still upload both the original PDF and the matching V1 proof file; CertTrace then hashes the exact PDF bytes, reconstructs the commitment, enforces that the proof credential ID matches the QR entry, and queries the configured contract.
+The first form is retained for legacy V1 links; V2 adds the explicit `version=v2` routing hint. The QR does not contain PDF bytes, the proof JSON, salt, personal information, or wallet secrets. Opening it pre-populates the public credential ID, but never produces a successful result by itself. The verifier must still upload both the original PDF and matching proof file; CertTrace then hashes the exact PDF bytes, reconstructs the commitment, enforces that the proof credential ID matches the QR entry, and queries only the selected allowlisted contract.
 
 For production/Vercel, set `NEXT_PUBLIC_APP_ORIGIN` to the canonical HTTPS deployment origin. If omitted, browser-side generation uses the current page origin, so a production browser never substitutes `localhost`.
 
 ---
 
-## Revocation Compatibility and V2 Plan
+## Revocation and V1 Compatibility
 
 The existing Sepolia deployment at `0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca` is **CertTrace V1**. Its stored credential has no revocation field, and its deployed bytecode has no `revokeCredential(bytes32)` or `isCredentialActive(bytes32)` selector. Revocation cannot be added to that non-upgradeable deployed instance, and the frontend does not simulate it.
 
-`blockchain/contracts/CertTraceV2.sol` is a separate, locally tested successor which adds permanent issuer-only revocation, explicit unknown/already-revoked errors, a `CredentialRevoked` event, and readable `isRevoked`/`revokedAt` state without overwriting original issuance data. The existing `CertTrace.sol`, deployment module, Sepolia address, and deployment records remain unchanged.
+`CertTraceV2` is deployed separately at `0xF8bd01c81124c0a9008463b40dD0a1aFf7D9256a`. It adds permanent issuer-only revocation, explicit unknown/already-revoked errors, a `CredentialRevoked` event, and readable `isRevoked`/`revokedAt` state without overwriting original issuance data. The existing `CertTrace.sol`, V1 address, and V1 deployment history remain unchanged.
 
-### Deployment and compatibility steps (not yet performed)
+V1 certificates were not migrated into V2 and are not described as revocable. Existing V1 proof files remain valid against the allowlisted V1 address. Newly issued V2 certificates use the same proof schema and `CERTTRACE_V1` commitment algorithm, but reference the allowlisted V2 address. A proof-provided address or URL version hint never overrides the application allowlist.
 
-1. Obtain explicit deployment approval and deploy the separate module:
+### Required production environment
 
-   ```bash
-   cd blockchain
-   npx hardhat ignition deploy --network sepolia ignition/modules/CertTraceV2.ts
-   ```
-
-2. Verify the new source/ABI and record the new Sepolia address. Do not replace or delete the V1 record.
-3. In the Vercel environment for a deliberate V2 application deployment, set:
-
-   ```text
-   NEXT_PUBLIC_CONTRACT_ADDRESS=<new-v2-address>
-   NEXT_PUBLIC_CONTRACT_VERSION=v2
-   NEXT_PUBLIC_APP_ORIGIN=https://<production-domain>
-   ```
-
-4. Rebuild/redeploy the frontend, then perform the real-world checks below with fictional data.
-
-V1 certificates are not migrated into V2. Existing V1 proof files remain valid when the app is configured for the V1 address/version. Newly issued V2 certificates use the same proof schema and `CERTTRACE_V1` commitment algorithm, but their proof files reference the new V2 address. A proof-provided address never overrides the application’s configured trusted address.
+```text
+NEXT_PUBLIC_V1_CONTRACT_ADDRESS=0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca
+NEXT_PUBLIC_V2_CONTRACT_ADDRESS=0xF8bd01c81124c0a9008463b40dD0a1aFf7D9256a
+NEXT_PUBLIC_ISSUANCE_CONTRACT_VERSION=v2
+NEXT_PUBLIC_APP_ORIGIN=https://<existing-production-domain>
+NEXT_PUBLIC_SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+```
 
 ---
 
-## Real-World Verification Checklist
+## Real-World Verification Results
 
 Use only the existing fictional certificate fixtures or another fictional academic certificate.
 
-### QR workflow on the current V1 deployment
+- V2 fictional issuance: [`0xce6700…940be`](https://sepolia.etherscan.io/tx/0xce6700cdca8fccb76fb53dd6c83b1ebbefdf4bd00018af4f08e03137829940be), block `11775417`.
+- Historical issuance-block status: registered, not revoked, active.
+- Original V2 PDF/proof before revocation: commitment matched the registered document.
+- Modified V2 PDF with the original proof: `DOCUMENT_MISMATCH`.
+- Unauthorized revocation simulation against the live contract: rejected.
+- V2 revocation: [`0x15db86…fb50d`](https://sepolia.etherscan.io/tx/0x15db8639a27f1caafce38b7c4e9d7ef322a3cae9cbb1bc0de717aea23e6fb50d), block `11775419`.
+- Current V2 state: registered, revoked, inactive.
+- Frontend verifier after revocation: original PDF `REVOKED — REGISTERED DOCUMENT`; modified PDF `DOCUMENT_MISMATCH`.
+- Two existing fictional V1 proofs still return `MATCHES_REGISTERED_DOCUMENT` for the original PDF and `DOCUMENT_MISMATCH` for the modified PDF.
 
-- Register or select a fictional certificate that is registered at the configured V1 address.
-- After transaction confirmation, download the generated QR PNG.
-- Open the QR URL in a separate browser/session and confirm the credential ID is populated.
-- Confirm the QR alone shows no successful verification result.
-- Upload the original PDF and matching proof, then confirm the live Sepolia result is `MATCHES REGISTERED DOCUMENT`.
-- Upload a modified PDF with the original proof and confirm `DOCUMENT MISMATCH`.
-- Try a proof for another credential and confirm `Credential ID Mismatch`.
-- Temporarily use an unavailable RPC endpoint and confirm `VERIFICATION UNAVAILABLE`, never success.
-
-### Revocation workflow after an explicitly approved V2 deployment
-
-- Register a fictional certificate on the new V2 address and confirm it is active.
-- Connect the authorized issuer on Sepolia and submit `revokeCredential()`.
-- Confirm the UI remains pending after wallet acceptance and reports success only after a successful receipt and status read-back.
-- Verify the same original PDF/proof and confirm `REVOKED — REGISTERED DOCUMENT`.
-- Confirm a modified PDF is still reported as a document mismatch.
-- Confirm unauthorized, unknown-ID, and repeated revocation attempts revert and never display success.
-- Confirm the corresponding V1 certificate population remains unchanged and is not described as migrated.
-
-These browser/MetaMask checks have not been claimed as completed by the automated test suite.
+Public Vercel browser/QR checks are tracked separately from these completed Sepolia and frontend-library checks.
 
 ---
 
@@ -134,8 +117,8 @@ npm test      # Runs tests across both web and blockchain
 ```bash
 cd web
 cp .env.example .env.local
-# Set NEXT_PUBLIC_CONTRACT_ADDRESS=0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca
-# Keep NEXT_PUBLIC_CONTRACT_VERSION=v1 for the existing deployment
+# Keep both trusted V1 and V2 addresses from .env.example
+# Set NEXT_PUBLIC_ISSUANCE_CONTRACT_VERSION=v2 for new certificates
 # Set NEXT_PUBLIC_APP_ORIGIN=https://your-certtrace-deployment.vercel.app for QR links
 npm run dev   # Starts Next.js app on http://localhost:3000
 npm test      # Runs frontend unit & integration tests

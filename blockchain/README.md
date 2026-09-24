@@ -9,6 +9,9 @@ This project implements the `CertTrace` smart contract using Hardhat 3, Mocha, a
 - `contracts/CertTrace.t.sol`: Foundry/Solidity unit tests and fuzzing for `CertTrace`.
 - `test/CertTrace.ts`: Comprehensive Mocha and Ethers.js integration test suite.
 - `ignition/modules/CertTrace.ts`: Hardhat Ignition deployment module.
+- `ignition/modules/CertTraceV2.ts`: Separate V2 deployment module.
+- `scripts/show-sepolia-deployer.ts`: Safe public deployer/chain preflight (never prints private material).
+- `scripts/sepolia-v2-e2e.ts`: Fictional-certificate Sepolia issuance, tamper, unauthorized-revocation simulation, and revocation check.
 
 ## Usage
 
@@ -35,10 +38,16 @@ When ready for Sepolia deployment:
 npx hardhat ignition deploy --network sepolia ignition/modules/CertTrace.ts
 ```
 
-The existing V1 deployment does not support revocation. A V2 deployment must be separately approved and uses its own module and address:
+The existing V1 deployment does not support revocation. V2 was separately approved and deployed with:
 
 ```shell
 npx hardhat ignition deploy --network sepolia ignition/modules/CertTraceV2.ts
 ```
 
-Deploying V2 does not migrate V1 credentials. Keep both deployment records and addresses distinct.
+V1: `0x0F89d0a4311a3EEbB6C04F664A590DB73006Ceca`
+
+V2: `0xF8bd01c81124c0a9008463b40dD0a1aFf7D9256a`
+
+Authorized issuer: `0x89CA83fB6Ed701549D6D40c404445fB4F06FB542`
+
+Deploying V2 did not migrate V1 credentials. Keep both deployment records and addresses distinct.

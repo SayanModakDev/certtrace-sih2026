@@ -186,7 +186,7 @@ export async function verifyCertificateWithBlockchain({
       outcome: "VERIFICATION_UNAVAILABLE",
       headline: "Blockchain Not Configured",
       details:
-        "The CertTrace smart contract address is not configured. Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local to enable on-chain verification.",
+        "The selected trusted CertTrace contract address is not configured for on-chain verification.",
       contractAddress: activeContractAddress || undefined,
       chainId: expectedChainId,
     };

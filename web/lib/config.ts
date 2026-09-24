@@ -12,17 +12,32 @@ export const DEFAULT_SEPOLIA_RPC_URL =
   process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL ||
   "https://ethereum-sepolia-rpc.publicnode.com";
 
-// Active Deployed Contract Address
-// Set via NEXT_PUBLIC_CONTRACT_ADDRESS environment variable after deployment to Sepolia.
-// Unsafe local development defaults (e.g. 0x5FbDB2315678afecb367f032d93F642f64180aa3) are strictly removed.
-export const CONFIGURED_CONTRACT_ADDRESS =
-  (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "").trim();
-
-// V1 is intentionally the default for compatibility with the existing Sepolia deployment.
-// Set this to "v2" only after separately deploying and explicitly configuring CertTraceV2.
 export type ContractVersion = "v1" | "v2";
-export const CONFIGURED_CONTRACT_VERSION: ContractVersion =
+
+const LEGACY_CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "").trim();
+const LEGACY_CONTRACT_VERSION: ContractVersion =
   process.env.NEXT_PUBLIC_CONTRACT_VERSION === "v2" ? "v2" : "v1";
+
+// Explicit trusted allowlist. The legacy variable remains a backwards-compatible V1 fallback.
+// No proof file or URL is allowed to introduce another contract address.
+export const TRUSTED_V1_CONTRACT_ADDRESS =
+  (process.env.NEXT_PUBLIC_V1_CONTRACT_ADDRESS ||
+    (LEGACY_CONTRACT_VERSION === "v1" ? LEGACY_CONTRACT_ADDRESS : "")).trim();
+export const TRUSTED_V2_CONTRACT_ADDRESS =
+  (process.env.NEXT_PUBLIC_V2_CONTRACT_ADDRESS ||
+    (LEGACY_CONTRACT_VERSION === "v2" ? LEGACY_CONTRACT_ADDRESS : "")).trim();
+
+// Controls new issuance only. Legacy verification chooses an explicit trusted version separately.
+export const CONFIGURED_CONTRACT_VERSION: ContractVersion =
+  process.env.NEXT_PUBLIC_ISSUANCE_CONTRACT_VERSION === "v2" ||
+  (!process.env.NEXT_PUBLIC_ISSUANCE_CONTRACT_VERSION && LEGACY_CONTRACT_VERSION === "v2")
+    ? "v2"
+    : "v1";
+
+export const CONFIGURED_CONTRACT_ADDRESS =
+  CONFIGURED_CONTRACT_VERSION === "v2"
+    ? TRUSTED_V2_CONTRACT_ADDRESS
+    : TRUSTED_V1_CONTRACT_ADDRESS;
 
 // Optional canonical public origin used in generated verification QR links.
 // Browser generation safely falls back to the current deployed origin (window.location.origin).
@@ -47,8 +62,33 @@ export const MIN_PDF_SIZE_BYTES = 10;
 /**
  * Checks if a valid CertTrace contract address is configured in the environment.
  */
-export function isContractConfigured(): boolean {
-  return /^0x[0-9a-fA-F]{40}$/.test(CONFIGURED_CONTRACT_ADDRESS);
+export function getTrustedContractAddress(version: ContractVersion): string {
+  return version === "v2" ? TRUSTED_V2_CONTRACT_ADDRESS : TRUSTED_V1_CONTRACT_ADDRESS;
+}
+
+export function isContractConfigured(
+  version: ContractVersion = CONFIGURED_CONTRACT_VERSION
+): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(getTrustedContractAddress(version));
+}
+
+export function isTrustedContractAddress(address: string, version?: ContractVersion): boolean {
+  const versions: ContractVersion[] = version ? [version] : ["v1", "v2"];
+  return isAddressInTrustedAllowlist(
+    address,
+    versions.map((candidate) => getTrustedContractAddress(candidate))
+  );
+}
+
+export function isAddressInTrustedAllowlist(
+  address: string,
+  trustedAddresses: readonly string[]
+): boolean {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return false;
+  const normalized = address.toLowerCase();
+  return trustedAddresses.some(
+    (trusted) => /^0x[0-9a-fA-F]{40}$/.test(trusted) && trusted.toLowerCase() === normalized
+  );
 }
 
 export function contractSupportsRevocation(
@@ -61,13 +101,15 @@ export function contractSupportsRevocation(
  * Returns the configured contract address.
  * Throws a descriptive error if the address is not configured.
  */
-export function getConfiguredContractAddress(): string {
-  if (!isContractConfigured()) {
+export function getConfiguredContractAddress(
+  version: ContractVersion = CONFIGURED_CONTRACT_VERSION
+): string {
+  if (!isContractConfigured(version)) {
     throw new Error(
-      "CertTrace smart contract address is not configured. Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local with a verified deployed Sepolia address."
+      `CertTrace ${version.toUpperCase()} contract address is not configured in the trusted application allowlist.`
     );
   }
-  return CONFIGURED_CONTRACT_ADDRESS;
+  return getTrustedContractAddress(version);
 }
 
 /**

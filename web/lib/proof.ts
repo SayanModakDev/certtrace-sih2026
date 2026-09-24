@@ -143,7 +143,7 @@ export function validateVerificationProof(
   } else if (!activeExpectedAddress) {
     return {
       success: false,
-      error: "Verification Unavailable: CertTrace contract address is not configured. Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local to verify against the active deployment.",
+      error: "Verification Unavailable: the selected trusted CertTrace contract address is not configured.",
     };
   }
 

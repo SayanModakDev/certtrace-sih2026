@@ -5,11 +5,12 @@ import { verifyCertificateWithBlockchain, VerificationResult } from "../lib/veri
 import { validatePdfMetadata } from "../lib/validation";
 import {
   SEPOLIA_CHAIN_ID,
-  CONFIGURED_CONTRACT_ADDRESS,
   isContractConfigured,
   getExplorerAddressUrl,
+  getTrustedContractAddress,
+  ContractVersion,
 } from "../lib/config";
-import { parseVerificationCredentialId } from "../lib/qr";
+import { parseContractVersionHint, parseVerificationCredentialId } from "../lib/qr";
 
 interface VerifierState {
   pdfFile: File | null;
@@ -22,9 +23,15 @@ interface VerifierState {
 
 interface VerifierPortalProps {
   initialCredentialId?: string | null;
+  initialContractVersion?: string | null;
 }
 
-export default function VerifierPortal({ initialCredentialId = null }: VerifierPortalProps) {
+export default function VerifierPortal({
+  initialCredentialId = null,
+  initialContractVersion = null,
+}: VerifierPortalProps) {
+  const parsedInitialVersion = parseContractVersionHint(initialContractVersion);
+  const [contractVersion, setContractVersion] = useState<ContractVersion>(parsedInitialVersion || "v1");
   const [state, setState] = useState<VerifierState>({
     pdfFile: null,
     proofFile: null,
@@ -37,10 +44,12 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const proofInputRef = useRef<HTMLInputElement>(null);
 
-  const contractConfigured = isContractConfigured();
+  const contractAddress = getTrustedContractAddress(contractVersion);
+  const contractConfigured = isContractConfigured(contractVersion);
   const qrCredentialId = parseVerificationCredentialId(initialCredentialId);
   const hasQrEntry = Boolean(initialCredentialId);
   const hasInvalidQrEntry = hasQrEntry && !qrCredentialId;
+  const hasInvalidVersionHint = initialContractVersion !== null && !parsedInitialVersion;
 
   const handlePdfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -119,7 +128,8 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
         pdfBuffer: buffer,
         proofInput: state.proofContent,
         expectedChainId: SEPOLIA_CHAIN_ID,
-        expectedContractAddress: CONFIGURED_CONTRACT_ADDRESS,
+        expectedContractAddress: contractAddress,
+        contractVersion,
         expectedCredentialId: qrCredentialId,
       });
 
@@ -170,6 +180,27 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
           </span>
         </div>
 
+        <div className="mt-4 flex flex-col sm:flex-row sm:items-center gap-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-3 text-xs">
+          <label htmlFor="verification-contract-version" className="font-semibold text-zinc-700 dark:text-zinc-300">
+            Verification target:
+          </label>
+          <select
+            id="verification-contract-version"
+            value={contractVersion}
+            onChange={(event) => {
+              setContractVersion(event.target.value as ContractVersion);
+              setState((prev) => ({ ...prev, result: null, error: null }));
+            }}
+            className="rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2.5 py-1.5 font-medium"
+          >
+            <option value="v1">V1 — legacy certificates</option>
+            <option value="v2" disabled={!isContractConfigured("v2")}>V2 — revocation-aware certificates</option>
+          </select>
+          <span className="text-zinc-500 dark:text-zinc-400">
+            Only application-allowlisted Sepolia contracts can be queried.
+          </span>
+        </div>
+
         {/* Contract Configuration Notice */}
         {!contractConfigured ? (
           <div className="mt-4 p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 rounded-xl text-xs text-amber-800 dark:text-amber-300 space-y-1">
@@ -177,9 +208,9 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
               <span>⚠️</span> Blockchain Not Configured
             </div>
             <p>
-              The CertTrace contract address is not configured in the environment. Set{" "}
+              The trusted CertTrace {contractVersion.toUpperCase()} contract address is not configured. Set{" "}
               <code className="font-mono bg-amber-100 dark:bg-amber-900/60 px-1 py-0.5 rounded">
-                NEXT_PUBLIC_CONTRACT_ADDRESS
+                {contractVersion === "v2" ? "NEXT_PUBLIC_V2_CONTRACT_ADDRESS" : "NEXT_PUBLIC_V1_CONTRACT_ADDRESS"}
               </code>{" "}
               in <code className="font-mono">.env.local</code> to enable live on-chain verification.
             </p>
@@ -188,10 +219,10 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
           <div className="mt-4 p-3 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-between flex-wrap gap-2">
             <div>
               <span className="font-medium text-zinc-700 dark:text-zinc-300">Target Contract: </span>
-              <span className="font-mono">{CONFIGURED_CONTRACT_ADDRESS}</span>
+              <span className="font-mono">{contractAddress}</span>
             </div>
             <a
-              href={getExplorerAddressUrl(CONFIGURED_CONTRACT_ADDRESS)}
+              href={getExplorerAddressUrl(contractAddress)}
               target="_blank"
               rel="noopener noreferrer"
               className="text-indigo-600 dark:text-indigo-400 underline hover:no-underline font-mono"
@@ -202,28 +233,29 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
         )}
 
         {/* QR-link entry context. A public ID is a lookup hint, never authenticity proof. */}
-        {hasQrEntry && (
+        {(hasQrEntry || initialContractVersion !== null) && (
           <div
             className={`mt-4 p-4 rounded-xl border text-xs space-y-1 ${
-              hasInvalidQrEntry
+              hasInvalidQrEntry || hasInvalidVersionHint
                 ? "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/60 text-red-800 dark:text-red-300"
                 : "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-900/60 text-indigo-800 dark:text-indigo-300"
             }`}
           >
             <div className="font-semibold flex items-center gap-1.5">
-              <span>{hasInvalidQrEntry ? "⚠️" : "▦"}</span>
-              {hasInvalidQrEntry ? "Invalid QR Verification Link" : "QR Verification Entry Loaded"}
+              <span>{hasInvalidQrEntry || hasInvalidVersionHint ? "⚠️" : "▦"}</span>
+              {hasInvalidQrEntry || hasInvalidVersionHint ? "Invalid QR Verification Link" : "QR Verification Entry Loaded"}
             </div>
             {qrCredentialId ? (
               <>
                 <p className="font-mono break-all">Credential ID: {qrCredentialId}</p>
+                <p>Trusted contract generation: {contractVersion.toUpperCase()}</p>
                 <p>
                   This public ID only opens the verification workflow. Upload the original PDF and its
                   proof file below; CertTrace will then recalculate the commitment and query Sepolia.
                 </p>
               </>
             ) : (
-              <p>The link does not contain a valid non-zero bytes32 credential ID.</p>
+              <p>The link contains an invalid credential ID or contract-version hint.</p>
             )}
           </div>
         )}
@@ -329,7 +361,7 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
         <div className="mt-6 flex gap-3">
           <button
             onClick={handleVerify}
-            disabled={!state.pdfFile || !state.proofContent || state.isVerifying || hasInvalidQrEntry}
+            disabled={!state.pdfFile || !state.proofContent || state.isVerifying || hasInvalidQrEntry || hasInvalidVersionHint || !contractConfigured}
             className="flex-1 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-white text-white dark:text-zinc-900 font-medium py-2.5 px-4 rounded-xl text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {state.isVerifying ? (
@@ -434,7 +466,11 @@ export default function VerifierPortal({ initialCredentialId = null }: VerifierP
                       ? "text-red-600 dark:text-red-400"
                       : "text-emerald-600 dark:text-emerald-400"
                   }`}>
-                    {state.result.onChainRecord.isRevoked ? "Revoked / Registered" : "Active / Registered"}
+                    {state.result.onChainRecord.isRevoked
+                      ? "Revoked / Registered"
+                      : contractVersion === "v2"
+                        ? "Active / Registered"
+                        : "Registered (V1 — no revocation support)"}
                   </span>
                   {state.result.onChainRecord.isRevoked && state.result.onChainRecord.revokedAt > 0 && (
                     <span className="block mt-1 text-zinc-500 dark:text-zinc-400">

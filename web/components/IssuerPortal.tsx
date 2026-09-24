@@ -104,7 +104,11 @@ export default function IssuerPortal() {
     if (!state.confirmedReceipt || !state.credentialId) return;
 
     try {
-      const verificationUrl = createVerificationUrl(state.credentialId);
+      const verificationUrl = createVerificationUrl(
+        state.credentialId,
+        undefined,
+        CONFIGURED_CONTRACT_VERSION
+      );
       setState((prev) => ({ ...prev, verificationUrl, qrDataUrl: null, qrError: null }));
 
       generateVerificationQrDataUrl(verificationUrl)
@@ -577,7 +581,7 @@ export default function IssuerPortal() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           <div className="p-3 bg-zinc-50 dark:bg-zinc-950 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <span className="text-zinc-500 dark:text-zinc-400 block font-medium mb-1">
-              Smart Contract Deployment:
+              Smart Contract Deployment ({CONFIGURED_CONTRACT_VERSION.toUpperCase()} issuance):
             </span>
             {contractConfigured ? (
               <span className="font-mono text-zinc-800 dark:text-zinc-200 break-all select-all">
@@ -585,7 +589,7 @@ export default function IssuerPortal() {
               </span>
             ) : (
               <span className="text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1">
-                ⚠️ Not Configured (Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local)
+                ⚠️ Not Configured (set the trusted {CONFIGURED_CONTRACT_VERSION.toUpperCase()} address)
               </span>
             )}
           </div>

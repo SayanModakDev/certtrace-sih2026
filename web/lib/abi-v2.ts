@@ -1,5 +1,5 @@
 /**
- * Minimal CertTraceV2 ABI used only when NEXT_PUBLIC_CONTRACT_VERSION=v2.
+ * Minimal CertTraceV2 ABI used for the trusted V2 address and V2 issuance/revocation.
  * V1 remains the default so the existing Sepolia deployment is never reinterpreted as V2.
  */
 export const CERTTRACE_V2_ABI = [

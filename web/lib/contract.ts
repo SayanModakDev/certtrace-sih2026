@@ -43,7 +43,7 @@ export function getReadOnlyContract(
   provider?: ethers.Provider,
   contractVersion: ContractVersion = CONFIGURED_CONTRACT_VERSION
 ): ethers.Contract {
-  const targetAddress = contractAddress || getConfiguredContractAddress();
+  const targetAddress = contractAddress || getConfiguredContractAddress(contractVersion);
   if (!isValidEthereumAddress(targetAddress)) {
     throw new Error(`Invalid contract address: "${targetAddress}"`);
   }
@@ -193,7 +193,7 @@ export async function submitIssueCredential(
   contractAddress?: string,
   contractVersion: ContractVersion = CONFIGURED_CONTRACT_VERSION
 ): Promise<{ txHash: string; wait: () => Promise<ethers.ContractTransactionReceipt> }> {
-  const targetAddress = contractAddress || getConfiguredContractAddress();
+  const targetAddress = contractAddress || getConfiguredContractAddress(contractVersion);
   if (!isValidEthereumAddress(targetAddress)) {
     throw new Error(`Invalid contract address: "${targetAddress}"`);
   }
@@ -233,7 +233,7 @@ export async function submitRevokeCredential(
     throw new Error("Revocation is unavailable on the configured CertTrace V1 contract.");
   }
 
-  const targetAddress = contractAddress || getConfiguredContractAddress();
+  const targetAddress = contractAddress || getConfiguredContractAddress(contractVersion);
   if (!isValidEthereumAddress(targetAddress)) {
     throw new Error(`Invalid contract address: "${targetAddress}"`);
   }
