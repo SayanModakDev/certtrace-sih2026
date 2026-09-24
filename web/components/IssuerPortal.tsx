@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { ethers } from "ethers";
-import { hashFileBytes, generateRandomBytes32, calculateCommitment, normalizeAddress } from "../lib/crypto";
+import { hashFileBytes, generateRandomBytes32, calculateCommitment, normalizeAddress, isValidBytes32 } from "../lib/crypto";
 import { createVerificationProof, downloadProofFile, VerificationProof } from "../lib/proof";
 import { validatePdfMetadata, validatePdfMagicBytes } from "../lib/validation";
 import {
@@ -10,6 +10,8 @@ import {
   CONFIGURED_CONTRACT_ADDRESS,
   isContractConfigured,
   getExplorerTxUrl,
+  CONFIGURED_CONTRACT_VERSION,
+  contractSupportsRevocation,
 } from "../lib/config";
 import {
   isMetaMaskInstalled,
@@ -21,7 +23,9 @@ import {
   fetchOnChainCredential,
   parseContractError,
   OnChainCredentialRecord,
+  submitRevokeCredential,
 } from "../lib/contract";
+import { createVerificationUrl, downloadQrImage, generateVerificationQrDataUrl } from "../lib/qr";
 
 interface IssuerState {
   file: File | null;
@@ -40,6 +44,9 @@ interface IssuerState {
   confirmedReceipt: ethers.ContractTransactionReceipt | null;
   confirmedOnChainRecord: OnChainCredentialRecord | null;
   error: string | null;
+  verificationUrl: string | null;
+  qrDataUrl: string | null;
+  qrError: string | null;
 }
 
 export default function IssuerPortal() {
@@ -58,6 +65,9 @@ export default function IssuerPortal() {
     confirmedReceipt: null,
     confirmedOnChainRecord: null,
     error: null,
+    verificationUrl: null,
+    qrDataUrl: null,
+    qrError: null,
   });
 
   // Wallet Connection States
@@ -67,6 +77,11 @@ export default function IssuerPortal() {
   const [isConnectingWallet, setIsConnectingWallet] = useState(false);
   const [isCheckingIssuer, setIsCheckingIssuer] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
+  const [revocationCredentialId, setRevocationCredentialId] = useState("");
+  const [isSubmittingRevocation, setIsSubmittingRevocation] = useState(false);
+  const [revocationTxHash, setRevocationTxHash] = useState<string | null>(null);
+  const [revocationConfirmed, setRevocationConfirmed] = useState<OnChainCredentialRecord | null>(null);
+  const [revocationError, setRevocationError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -75,12 +90,46 @@ export default function IssuerPortal() {
   }, []);
 
   const contractConfigured = isContractConfigured();
+  const revocationSupported = contractSupportsRevocation();
   const isCorrectNetwork = walletChainId === SEPOLIA_CHAIN_ID;
   const isAuthorizedIssuer = Boolean(
     walletAddress &&
     contractAuthorizedIssuer &&
     normalizeAddress(walletAddress) === normalizeAddress(contractAuthorizedIssuer)
   );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!state.confirmedReceipt || !state.credentialId) return;
+
+    try {
+      const verificationUrl = createVerificationUrl(state.credentialId);
+      setState((prev) => ({ ...prev, verificationUrl, qrDataUrl: null, qrError: null }));
+
+      generateVerificationQrDataUrl(verificationUrl)
+        .then((qrDataUrl) => {
+          if (!cancelled) setState((prev) => ({ ...prev, qrDataUrl }));
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) {
+            setState((prev) => ({
+              ...prev,
+              qrError: error instanceof Error ? error.message : "Failed to generate verification QR code",
+            }));
+          }
+        });
+    } catch (error: unknown) {
+      setState((prev) => ({
+        ...prev,
+        qrError: error instanceof Error ? error.message : "Failed to build verification link",
+      }));
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.confirmedReceipt, state.credentialId]);
 
   // Check on-chain authorized issuer when contract or wallet changes
   const checkOnChainIssuer = useCallback(async () => {
@@ -199,6 +248,9 @@ export default function IssuerPortal() {
         txHash: null,
         confirmedReceipt: null,
         confirmedOnChainRecord: null,
+        verificationUrl: null,
+        qrDataUrl: null,
+        qrError: null,
       }));
       return;
     }
@@ -217,6 +269,9 @@ export default function IssuerPortal() {
       txHash: null,
       confirmedReceipt: null,
       confirmedOnChainRecord: null,
+      verificationUrl: null,
+      qrDataUrl: null,
+      qrError: null,
     }));
   };
 
@@ -268,6 +323,9 @@ export default function IssuerPortal() {
         txHash: null,
         confirmedReceipt: null,
         confirmedOnChainRecord: null,
+        verificationUrl: null,
+        qrDataUrl: null,
+        qrError: null,
       }));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to process certificate";
@@ -334,6 +392,9 @@ export default function IssuerPortal() {
       txHash: null,
       confirmedReceipt: null,
       confirmedOnChainRecord: null,
+      verificationUrl: null,
+      qrDataUrl: null,
+      qrError: null,
     }));
 
     try {
@@ -376,6 +437,56 @@ export default function IssuerPortal() {
     }
   };
 
+  const handleRevokeCredential = async () => {
+    const credentialId = revocationCredentialId.trim();
+    if (!revocationSupported) {
+      setRevocationError("Revocation is unavailable on the configured CertTrace V1 deployment.");
+      return;
+    }
+    if (!isValidBytes32(credentialId)) {
+      setRevocationError("Enter a valid non-zero bytes32 credential ID.");
+      return;
+    }
+    if (!walletAddress || !isCorrectNetwork || !isAuthorizedIssuer) {
+      setRevocationError("Connect the authorized issuer wallet on Sepolia before revoking.");
+      return;
+    }
+
+    setIsSubmittingRevocation(true);
+    setRevocationTxHash(null);
+    setRevocationConfirmed(null);
+    setRevocationError(null);
+
+    try {
+      const provider = getBrowserProvider();
+      if (!provider) throw new Error("MetaMask provider is not available.");
+      const signer = await provider.getSigner();
+      const { txHash, wait } = await submitRevokeCredential(
+        signer,
+        credentialId,
+        CONFIGURED_CONTRACT_ADDRESS,
+        CONFIGURED_CONTRACT_VERSION
+      );
+
+      setRevocationTxHash(txHash);
+      await wait();
+      const record = await fetchOnChainCredential(
+        credentialId,
+        CONFIGURED_CONTRACT_ADDRESS,
+        undefined,
+        CONFIGURED_CONTRACT_VERSION
+      );
+      if (!record.isRegistered || !record.isRevoked) {
+        throw new Error("The confirmed transaction did not produce a revoked credential state.");
+      }
+      setRevocationConfirmed(record);
+    } catch (error: unknown) {
+      setRevocationError(parseContractError(error));
+    } finally {
+      setIsSubmittingRevocation(false);
+    }
+  };
+
   const handleReset = () => {
     setState({
       file: null,
@@ -392,6 +503,9 @@ export default function IssuerPortal() {
       confirmedReceipt: null,
       confirmedOnChainRecord: null,
       error: null,
+      verificationUrl: null,
+      qrDataUrl: null,
+      qrError: null,
     });
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -793,6 +907,58 @@ export default function IssuerPortal() {
                 </a>
               </div>
             )}
+
+            {state.confirmedReceipt && state.credentialId && (
+              <div className="p-4 bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900/60 rounded-xl space-y-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-indigo-900 dark:text-indigo-200">
+                    Share Public Verification Entry
+                  </h4>
+                  <p className="mt-1 text-xs text-indigo-800 dark:text-indigo-300">
+                    This QR contains only the CertTrace verification URL and public credential ID. It does not contain the PDF, salt, proof file, or personal data, and it is not proof of validity.
+                  </p>
+                </div>
+
+                {state.qrError ? (
+                  <p className="text-xs text-red-700 dark:text-red-300">{state.qrError}</p>
+                ) : state.qrDataUrl && state.verificationUrl ? (
+                  <div className="flex flex-col sm:flex-row gap-4 items-start">
+                    {/* eslint-disable-next-line @next/next/no-img-element -- locally generated data URL */}
+                    <img
+                      src={state.qrDataUrl}
+                      alt="QR code for the CertTrace public verification entry"
+                      width={180}
+                      height={180}
+                      className="rounded-lg border border-indigo-200 bg-white p-2"
+                    />
+                    <div className="min-w-0 flex-1 space-y-3">
+                      <p className="font-mono text-[11px] break-all text-indigo-950 dark:text-indigo-200 select-all">
+                        {state.verificationUrl}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <a
+                          href={state.verificationUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium py-2 px-3 rounded-lg text-xs"
+                        >
+                          Open Verification Link ↗
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => downloadQrImage(state.qrDataUrl!, state.credentialId!)}
+                          className="border border-indigo-300 dark:border-indigo-700 text-indigo-800 dark:text-indigo-200 font-medium py-2 px-3 rounded-lg text-xs hover:bg-indigo-100 dark:hover:bg-indigo-900/50"
+                        >
+                          Download QR PNG
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-indigo-700 dark:text-indigo-300">Generating QR code locally...</p>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="pt-2 flex justify-end">
@@ -803,6 +969,53 @@ export default function IssuerPortal() {
               Issue Another Certificate
             </button>
           </div>
+        </div>
+      )}
+
+      {revocationSupported ? (
+        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm space-y-4">
+          <div>
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Revoke a Registered Credential</h3>
+            <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+              V2 only. Revocation is permanent and succeeds only after the Sepolia transaction confirms and the updated status is read back on-chain.
+            </p>
+          </div>
+          <input
+            value={revocationCredentialId}
+            onChange={(event) => setRevocationCredentialId(event.target.value)}
+            placeholder="0x… credential ID"
+            aria-label="Credential ID to revoke"
+            className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-3 py-2.5 font-mono text-xs"
+          />
+          {revocationError && <p className="text-xs text-red-600 dark:text-red-400">{revocationError}</p>}
+          {isSubmittingRevocation && (
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              {revocationTxHash ? "Transaction broadcast; waiting for confirmation…" : "Waiting for MetaMask submission…"}
+            </p>
+          )}
+          {revocationTxHash && (
+            <a href={getExplorerTxUrl(revocationTxHash)} target="_blank" rel="noopener noreferrer" className="block text-xs font-mono text-indigo-600 dark:text-indigo-400 underline break-all">
+              {revocationTxHash} ↗
+            </a>
+          )}
+          {revocationConfirmed && (
+            <p className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 text-xs font-semibold text-red-700 dark:text-red-300">
+              REVOKED — on-chain status confirmed at {new Date(revocationConfirmed.revokedAt * 1000).toLocaleString()}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={handleRevokeCredential}
+            disabled={isSubmittingRevocation || !walletAddress || !isCorrectNetwork || !isAuthorizedIssuer}
+            className="w-full bg-red-700 hover:bg-red-600 text-white font-medium py-2.5 px-4 rounded-xl text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isSubmittingRevocation ? "Revocation Pending…" : "Submit revokeCredential()"}
+          </button>
+        </div>
+      ) : (
+        <div className="bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 text-xs text-zinc-600 dark:text-zinc-400">
+          <strong className="text-zinc-800 dark:text-zinc-200">Revocation status:</strong>{" "}
+          The configured Sepolia contract is CertTrace V1 and has no revocation function. A separately deployed V2 contract must be explicitly configured before real revocation controls can be enabled.
         </div>
       )}
     </div>

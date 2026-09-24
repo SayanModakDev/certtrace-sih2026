@@ -5,11 +5,15 @@ import { validatePdfMagicBytes, validatePdfMetadata } from "./validation";
 import {
   SEPOLIA_CHAIN_ID,
   CONFIGURED_CONTRACT_ADDRESS,
+  CONFIGURED_CONTRACT_VERSION,
+  ContractVersion,
 } from "./config";
 import { fetchOnChainCredential, getAuthorizedIssuer, OnChainCredentialRecord, parseContractError } from "./contract";
+import { credentialIdMatchesQrEntry, parseVerificationCredentialId } from "./qr";
 
 export type VerificationOutcome =
   | "MATCHES_REGISTERED_DOCUMENT"
+  | "REVOKED_REGISTERED_DOCUMENT"
   | "DOCUMENT_MISMATCH"
   | "UNKNOWN_CREDENTIAL"
   | "VERIFICATION_UNAVAILABLE";
@@ -55,6 +59,8 @@ export interface VerifyCertificateParams {
   expectedChainId?: number;
   expectedContractAddress?: string;
   provider?: Provider;
+  contractVersion?: ContractVersion;
+  expectedCredentialId?: string | null;
 }
 
 /**
@@ -67,6 +73,7 @@ export async function prepareCertificateVerification({
   proofInput,
   expectedChainId = SEPOLIA_CHAIN_ID,
   expectedContractAddress = CONFIGURED_CONTRACT_ADDRESS,
+  expectedCredentialId,
 }: VerifyCertificateParams): Promise<VerificationPreparationResult> {
   const metaValidation = validatePdfMetadata(pdfFile);
   if (!metaValidation.valid) {
@@ -101,6 +108,24 @@ export async function prepareCertificateVerification({
   }
 
   const { proof } = proofResult;
+
+  const qrCredentialId = expectedCredentialId
+    ? parseVerificationCredentialId(expectedCredentialId)
+    : null;
+  if (expectedCredentialId && !qrCredentialId) {
+    return {
+      success: false,
+      error: "Invalid credential ID in the verification link.",
+      stage: "PROOF_VALIDATION",
+    };
+  }
+  if (!credentialIdMatchesQrEntry(qrCredentialId, proof.credentialId)) {
+    return {
+      success: false,
+      error: "The selected proof file belongs to a different credential ID than the QR link.",
+      stage: "PROOF_VALIDATION",
+    };
+  }
 
   let fileHash: string;
   try {
@@ -150,6 +175,8 @@ export async function verifyCertificateWithBlockchain({
   expectedChainId = SEPOLIA_CHAIN_ID,
   expectedContractAddress = CONFIGURED_CONTRACT_ADDRESS,
   provider,
+  contractVersion = CONFIGURED_CONTRACT_VERSION,
+  expectedCredentialId,
 }: VerifyCertificateParams): Promise<VerificationResult> {
   const activeContractAddress = expectedContractAddress || CONFIGURED_CONTRACT_ADDRESS;
 
@@ -208,6 +235,29 @@ export async function verifyCertificateWithBlockchain({
 
   const { proof } = proofResult;
 
+  const qrCredentialId = expectedCredentialId
+    ? parseVerificationCredentialId(expectedCredentialId)
+    : null;
+  if (expectedCredentialId && !qrCredentialId) {
+    return {
+      outcome: "VERIFICATION_UNAVAILABLE",
+      headline: "Invalid Verification Link",
+      details: "The QR link does not contain a valid CertTrace credential ID.",
+      contractAddress: activeContractAddress,
+      chainId: expectedChainId,
+    };
+  }
+  if (!credentialIdMatchesQrEntry(qrCredentialId, proof.credentialId)) {
+    return {
+      outcome: "VERIFICATION_UNAVAILABLE",
+      headline: "Credential ID Mismatch",
+      details: "The proof file belongs to a different credential ID than the QR verification link.",
+      proof,
+      contractAddress: activeContractAddress,
+      chainId: expectedChainId,
+    };
+  }
+
   // 5. Calculate local SHA-256 over exact PDF bytes
   let fileHash: string;
   try {
@@ -241,7 +291,12 @@ export async function verifyCertificateWithBlockchain({
   let authorizedIssuer: string | undefined;
 
   try {
-    onChainRecord = await fetchOnChainCredential(proof.credentialId, activeContractAddress, provider);
+    onChainRecord = await fetchOnChainCredential(
+      proof.credentialId,
+      activeContractAddress,
+      provider,
+      contractVersion
+    );
   } catch (err: unknown) {
     const errorMsg = parseContractError(err);
     return {
@@ -259,7 +314,7 @@ export async function verifyCertificateWithBlockchain({
 
   // Fetch contract's authorized issuer for verification display
   try {
-    authorizedIssuer = await getAuthorizedIssuer(activeContractAddress, provider);
+    authorizedIssuer = await getAuthorizedIssuer(activeContractAddress, provider, contractVersion);
   } catch {
     // Non-fatal if issuer query fails
   }
@@ -289,6 +344,23 @@ export async function verifyCertificateWithBlockchain({
   // Record exists on-chain: Compare cryptographic commitments
   const matches =
     onChainRecord.commitment.toLowerCase() === reconstructedCommitment.toLowerCase();
+
+  if (matches && onChainRecord.isRevoked) {
+    return {
+      outcome: "REVOKED_REGISTERED_DOCUMENT",
+      headline: "Revoked — Registered Document",
+      details:
+        "The PDF matches the registered on-chain document, but the authorized issuer has revoked this credential. It must not be treated as active or valid.",
+      fileHash,
+      reconstructedCommitment,
+      proof,
+      onChainRecord,
+      authorizedIssuer,
+      isIssuerAuthorized,
+      contractAddress: activeContractAddress,
+      chainId: expectedChainId,
+    };
+  }
 
   if (matches) {
     return {

@@ -9,6 +9,7 @@ import {
   isContractConfigured,
   getExplorerAddressUrl,
 } from "../lib/config";
+import { parseVerificationCredentialId } from "../lib/qr";
 
 interface VerifierState {
   pdfFile: File | null;
@@ -19,7 +20,11 @@ interface VerifierState {
   error: string | null;
 }
 
-export default function VerifierPortal() {
+interface VerifierPortalProps {
+  initialCredentialId?: string | null;
+}
+
+export default function VerifierPortal({ initialCredentialId = null }: VerifierPortalProps) {
   const [state, setState] = useState<VerifierState>({
     pdfFile: null,
     proofFile: null,
@@ -33,6 +38,9 @@ export default function VerifierPortal() {
   const proofInputRef = useRef<HTMLInputElement>(null);
 
   const contractConfigured = isContractConfigured();
+  const qrCredentialId = parseVerificationCredentialId(initialCredentialId);
+  const hasQrEntry = Boolean(initialCredentialId);
+  const hasInvalidQrEntry = hasQrEntry && !qrCredentialId;
 
   const handlePdfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -112,6 +120,7 @@ export default function VerifierPortal() {
         proofInput: state.proofContent,
         expectedChainId: SEPOLIA_CHAIN_ID,
         expectedContractAddress: CONFIGURED_CONTRACT_ADDRESS,
+        expectedCredentialId: qrCredentialId,
       });
 
       setState((prev) => ({
@@ -189,6 +198,33 @@ export default function VerifierPortal() {
             >
               Sepolia Etherscan ↗
             </a>
+          </div>
+        )}
+
+        {/* QR-link entry context. A public ID is a lookup hint, never authenticity proof. */}
+        {hasQrEntry && (
+          <div
+            className={`mt-4 p-4 rounded-xl border text-xs space-y-1 ${
+              hasInvalidQrEntry
+                ? "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/60 text-red-800 dark:text-red-300"
+                : "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-900/60 text-indigo-800 dark:text-indigo-300"
+            }`}
+          >
+            <div className="font-semibold flex items-center gap-1.5">
+              <span>{hasInvalidQrEntry ? "⚠️" : "▦"}</span>
+              {hasInvalidQrEntry ? "Invalid QR Verification Link" : "QR Verification Entry Loaded"}
+            </div>
+            {qrCredentialId ? (
+              <>
+                <p className="font-mono break-all">Credential ID: {qrCredentialId}</p>
+                <p>
+                  This public ID only opens the verification workflow. Upload the original PDF and its
+                  proof file below; CertTrace will then recalculate the commitment and query Sepolia.
+                </p>
+              </>
+            ) : (
+              <p>The link does not contain a valid non-zero bytes32 credential ID.</p>
+            )}
           </div>
         )}
 
@@ -293,7 +329,7 @@ export default function VerifierPortal() {
         <div className="mt-6 flex gap-3">
           <button
             onClick={handleVerify}
-            disabled={!state.pdfFile || !state.proofContent || state.isVerifying}
+            disabled={!state.pdfFile || !state.proofContent || state.isVerifying || hasInvalidQrEntry}
             className="flex-1 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-white text-white dark:text-zinc-900 font-medium py-2.5 px-4 rounded-xl text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {state.isVerifying ? (
@@ -325,6 +361,7 @@ export default function VerifierPortal() {
             <div>
               <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
                 {state.result.outcome === "MATCHES_REGISTERED_DOCUMENT" && <span className="text-emerald-500">✓</span>}
+                {state.result.outcome === "REVOKED_REGISTERED_DOCUMENT" && <span className="text-red-500">✗</span>}
                 {state.result.outcome === "DOCUMENT_MISMATCH" && <span className="text-amber-500">⚠️</span>}
                 {state.result.outcome === "UNKNOWN_CREDENTIAL" && <span className="text-zinc-400">ℹ️</span>}
                 {state.result.outcome === "VERIFICATION_UNAVAILABLE" && <span className="text-red-500">✗</span>}
@@ -339,6 +376,11 @@ export default function VerifierPortal() {
               {state.result.outcome === "MATCHES_REGISTERED_DOCUMENT" && (
                 <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
                   MATCHES REGISTERED DOCUMENT
+                </span>
+              )}
+              {state.result.outcome === "REVOKED_REGISTERED_DOCUMENT" && (
+                <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300 border border-red-300 dark:border-red-800">
+                  REVOKED — REGISTERED DOCUMENT
                 </span>
               )}
               {state.result.outcome === "DOCUMENT_MISMATCH" && (
@@ -387,9 +429,18 @@ export default function VerifierPortal() {
 
                 <div>
                   <span className="text-zinc-500 dark:text-zinc-400 block mb-0.5">Registration Status:</span>
-                  <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                    Active / Registered
+                  <span className={`font-semibold ${
+                    state.result.onChainRecord.isRevoked
+                      ? "text-red-600 dark:text-red-400"
+                      : "text-emerald-600 dark:text-emerald-400"
+                  }`}>
+                    {state.result.onChainRecord.isRevoked ? "Revoked / Registered" : "Active / Registered"}
                   </span>
+                  {state.result.onChainRecord.isRevoked && state.result.onChainRecord.revokedAt > 0 && (
+                    <span className="block mt-1 text-zinc-500 dark:text-zinc-400">
+                      Revoked: {new Date(state.result.onChainRecord.revokedAt * 1000).toLocaleString()}
+                    </span>
+                  )}
                 </div>
 
                 <div>

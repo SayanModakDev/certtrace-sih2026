@@ -18,6 +18,17 @@ export const DEFAULT_SEPOLIA_RPC_URL =
 export const CONFIGURED_CONTRACT_ADDRESS =
   (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "").trim();
 
+// V1 is intentionally the default for compatibility with the existing Sepolia deployment.
+// Set this to "v2" only after separately deploying and explicitly configuring CertTraceV2.
+export type ContractVersion = "v1" | "v2";
+export const CONFIGURED_CONTRACT_VERSION: ContractVersion =
+  process.env.NEXT_PUBLIC_CONTRACT_VERSION === "v2" ? "v2" : "v1";
+
+// Optional canonical public origin used in generated verification QR links.
+// Browser generation safely falls back to the current deployed origin (window.location.origin).
+export const CONFIGURED_PUBLIC_APP_ORIGIN =
+  (process.env.NEXT_PUBLIC_APP_ORIGIN || "").trim();
+
 // Sepolia Block Explorer URL
 export const SEPOLIA_EXPLORER_URL = "https://sepolia.etherscan.io";
 
@@ -38,6 +49,12 @@ export const MIN_PDF_SIZE_BYTES = 10;
  */
 export function isContractConfigured(): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(CONFIGURED_CONTRACT_ADDRESS);
+}
+
+export function contractSupportsRevocation(
+  version: ContractVersion = CONFIGURED_CONTRACT_VERSION
+): boolean {
+  return version === "v2";
 }
 
 /**
