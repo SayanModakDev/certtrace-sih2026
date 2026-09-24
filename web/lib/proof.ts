@@ -1,4 +1,9 @@
-import { SEPOLIA_CHAIN_ID, DEFAULT_CONTRACT_ADDRESS, SUPPORTED_PROOF_VERSION } from "./config";
+import {
+  SEPOLIA_CHAIN_ID,
+  SUPPORTED_PROOF_VERSION,
+  CONFIGURED_CONTRACT_ADDRESS,
+  getConfiguredContractAddress,
+} from "./config";
 import { isValidBytes32, isValidEthereumAddress, normalizeAddress } from "./crypto";
 
 /**
@@ -18,21 +23,24 @@ export type ProofValidationResult =
 
 /**
  * Creates a clean verification proof object conforming to the CertTrace schema.
+ * Requires a valid deployed contract address.
  */
 export function createVerificationProof(
   credentialId: string,
   salt: string,
   chainId: number = SEPOLIA_CHAIN_ID,
-  contractAddress: string = DEFAULT_CONTRACT_ADDRESS
+  contractAddress?: string
 ): VerificationProof {
+  const targetAddress = contractAddress || getConfiguredContractAddress();
+
   if (!isValidBytes32(credentialId)) {
-    throw new Error("Cannot create proof: invalid credentialId");
+    throw new Error("Cannot create proof: invalid credentialId (must be 32-byte non-zero hex)");
   }
   if (!isValidBytes32(salt)) {
-    throw new Error("Cannot create proof: invalid salt");
+    throw new Error("Cannot create proof: invalid salt (must be 32-byte non-zero hex)");
   }
-  if (!isValidEthereumAddress(contractAddress)) {
-    throw new Error("Cannot create proof: invalid contractAddress");
+  if (!isValidEthereumAddress(targetAddress)) {
+    throw new Error(`Cannot create proof: invalid contractAddress "${targetAddress}"`);
   }
 
   return {
@@ -40,7 +48,7 @@ export function createVerificationProof(
     credentialId: credentialId.toLowerCase(),
     salt: salt.toLowerCase(),
     chainId,
-    contractAddress: normalizeAddress(contractAddress),
+    contractAddress: normalizeAddress(targetAddress),
   };
 }
 
@@ -52,7 +60,7 @@ export function createVerificationProof(
 export function validateVerificationProof(
   input: unknown,
   expectedChainId: number = SEPOLIA_CHAIN_ID,
-  expectedContractAddress: string = DEFAULT_CONTRACT_ADDRESS
+  expectedContractAddress?: string
 ): ProofValidationResult {
   let parsed: unknown = input;
 
@@ -122,13 +130,21 @@ export function validateVerificationProof(
     return { success: false, error: "Invalid 'contractAddress' format in proof: not an Ethereum address" };
   }
 
-  if (expectedContractAddress && isValidEthereumAddress(expectedContractAddress)) {
-    if (normalizeAddress(record.contractAddress) !== normalizeAddress(expectedContractAddress)) {
+  // Compare with expected contract address if specified or configured
+  const activeExpectedAddress = expectedContractAddress !== undefined ? expectedContractAddress : CONFIGURED_CONTRACT_ADDRESS;
+
+  if (activeExpectedAddress && isValidEthereumAddress(activeExpectedAddress)) {
+    if (normalizeAddress(record.contractAddress) !== normalizeAddress(activeExpectedAddress)) {
       return {
         success: false,
-        error: `Incorrect contract address reference: proof specifies ${record.contractAddress}, expected ${expectedContractAddress}`,
+        error: `Incorrect contract address reference: proof specifies ${record.contractAddress}, expected ${activeExpectedAddress}`,
       };
     }
+  } else if (!activeExpectedAddress) {
+    return {
+      success: false,
+      error: "Verification Unavailable: CertTrace contract address is not configured. Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local to verify against the active deployment.",
+    };
   }
 
   // Forbidden fields check (prevent accidental inclusion of sensitive data)
@@ -154,7 +170,7 @@ export function validateVerificationProof(
 /**
  * Triggers a browser download of the verification proof JSON.
  */
-export function downloadProofFile(proof: VerificationProof, baseFilename: string = "credential-proof"): void {
+export function downloadProofFile(proof: VerificationProof, baseFilename: string = "certtrace-proof"): void {
   if (typeof window === "undefined") {
     return;
   }

@@ -1,10 +1,27 @@
 "use client";
 
-import React, { useState, useRef } from "react";
-import { hashFileBytes, generateRandomBytes32, calculateCommitment } from "../lib/crypto";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { ethers } from "ethers";
+import { hashFileBytes, generateRandomBytes32, calculateCommitment, normalizeAddress } from "../lib/crypto";
 import { createVerificationProof, downloadProofFile, VerificationProof } from "../lib/proof";
 import { validatePdfMetadata, validatePdfMagicBytes } from "../lib/validation";
-import { DEFAULT_CONTRACT_ADDRESS, SEPOLIA_CHAIN_ID } from "../lib/config";
+import {
+  SEPOLIA_CHAIN_ID,
+  CONFIGURED_CONTRACT_ADDRESS,
+  isContractConfigured,
+  getExplorerTxUrl,
+} from "../lib/config";
+import {
+  isMetaMaskInstalled,
+  getBrowserProvider,
+  requestConnectWallet,
+  switchToSepolia,
+  getAuthorizedIssuer,
+  submitIssueCredential,
+  fetchOnChainCredential,
+  parseContractError,
+  OnChainCredentialRecord,
+} from "../lib/contract";
 
 interface IssuerState {
   file: File | null;
@@ -13,9 +30,16 @@ interface IssuerState {
   salt: string | null;
   commitment: string | null;
   proof: VerificationProof | null;
-  isProcessing: boolean;
-  error: string | null;
   hasDownloadedProof: boolean;
+  userConfirmedSavedProof: boolean;
+  isComputingCrypto: boolean;
+
+  // Blockchain Transaction States
+  isSubmittingTx: boolean;
+  txHash: string | null;
+  confirmedReceipt: ethers.ContractTransactionReceipt | null;
+  confirmedOnChainRecord: OnChainCredentialRecord | null;
+  error: string | null;
 }
 
 export default function IssuerPortal() {
@@ -26,18 +50,136 @@ export default function IssuerPortal() {
     salt: null,
     commitment: null,
     proof: null,
-    isProcessing: false,
-    error: null,
     hasDownloadedProof: false,
+    userConfirmedSavedProof: false,
+    isComputingCrypto: false,
+    isSubmittingTx: false,
+    txHash: null,
+    confirmedReceipt: null,
+    confirmedOnChainRecord: null,
+    error: null,
   });
 
+  // Wallet Connection States
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [walletChainId, setWalletChainId] = useState<number | null>(null);
+  const [contractAuthorizedIssuer, setContractAuthorizedIssuer] = useState<string | null>(null);
+  const [isConnectingWallet, setIsConnectingWallet] = useState(false);
+  const [isCheckingIssuer, setIsCheckingIssuer] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const contractConfigured = isContractConfigured();
+  const isCorrectNetwork = walletChainId === SEPOLIA_CHAIN_ID;
+  const isAuthorizedIssuer = Boolean(
+    walletAddress &&
+    contractAuthorizedIssuer &&
+    normalizeAddress(walletAddress) === normalizeAddress(contractAuthorizedIssuer)
+  );
+
+  // Check on-chain authorized issuer when contract or wallet changes
+  const checkOnChainIssuer = useCallback(async () => {
+    if (!contractConfigured) return;
+    setIsCheckingIssuer(true);
+    try {
+      const issuer = await getAuthorizedIssuer();
+      setContractAuthorizedIssuer(issuer);
+    } catch {
+      setContractAuthorizedIssuer(null);
+    } finally {
+      setIsCheckingIssuer(false);
+    }
+  }, [contractConfigured]);
+
+  useEffect(() => {
+    checkOnChainIssuer();
+  }, [checkOnChainIssuer]);
+
+  // Setup MetaMask event listeners
+  useEffect(() => {
+    if (!isMetaMaskInstalled()) return;
+
+    const ethereum = (window as unknown as { ethereum: {
+      on: (event: string, handler: (...args: unknown[]) => void) => void;
+      removeListener: (event: string, handler: (...args: unknown[]) => void) => void;
+    } }).ethereum;
+
+    const handleAccountsChanged = (accounts: unknown) => {
+      const accList = accounts as string[];
+      if (accList && accList.length > 0) {
+        setWalletAddress(normalizeAddress(accList[0]));
+      } else {
+        setWalletAddress(null);
+      }
+    };
+
+    const handleChainChanged = (chainIdHex: unknown) => {
+      const newChainId = parseInt(chainIdHex as string, 16);
+      setWalletChainId(newChainId);
+    };
+
+    ethereum.on("accountsChanged", handleAccountsChanged);
+    ethereum.on("chainChanged", handleChainChanged);
+
+    // Initial check if already connected
+    const provider = getBrowserProvider();
+    if (provider) {
+      provider.listAccounts().then((accounts) => {
+        if (accounts.length > 0) {
+          setWalletAddress(normalizeAddress(accounts[0].address));
+        }
+      }).catch(() => {});
+
+      provider.getNetwork().then((net) => {
+        setWalletChainId(Number(net.chainId));
+      }).catch(() => {});
+    }
+
+    return () => {
+      ethereum.removeListener("accountsChanged", handleAccountsChanged);
+      ethereum.removeListener("chainChanged", handleChainChanged);
+    };
+  }, []);
+
+  const handleConnectWallet = async () => {
+    setIsConnectingWallet(true);
+    setState((prev) => ({ ...prev, error: null }));
+    try {
+      const { address, chainId } = await requestConnectWallet();
+      setWalletAddress(address);
+      setWalletChainId(chainId);
+      await checkOnChainIssuer();
+    } catch (err: unknown) {
+      setState((prev) => ({
+        ...prev,
+        error: parseContractError(err),
+      }));
+    } finally {
+      setIsConnectingWallet(false);
+    }
+  };
+
+  const handleSwitchNetwork = async () => {
+    setState((prev) => ({ ...prev, error: null }));
+    try {
+      await switchToSepolia();
+      const provider = getBrowserProvider();
+      if (provider) {
+        const net = await provider.getNetwork();
+        setWalletChainId(Number(net.chainId));
+      }
+    } catch (err: unknown) {
+      setState((prev) => ({
+        ...prev,
+        error: parseContractError(err),
+      }));
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
     if (!selected) return;
 
-    // Reset results on new file select
     const validation = validatePdfMetadata(selected);
     if (!validation.valid) {
       setState((prev) => ({
@@ -49,6 +191,9 @@ export default function IssuerPortal() {
         salt: null,
         commitment: null,
         proof: null,
+        txHash: null,
+        confirmedReceipt: null,
+        confirmedOnChainRecord: null,
       }));
       return;
     }
@@ -63,23 +208,26 @@ export default function IssuerPortal() {
       commitment: null,
       proof: null,
       hasDownloadedProof: false,
+      userConfirmedSavedProof: false,
+      txHash: null,
+      confirmedReceipt: null,
+      confirmedOnChainRecord: null,
     }));
   };
 
   const processCertificate = async () => {
     if (!state.file) return;
 
-    setState((prev) => ({ ...prev, isProcessing: true, error: null }));
+    setState((prev) => ({ ...prev, isComputingCrypto: true, error: null }));
 
     try {
       const arrayBuffer = await state.file.arrayBuffer();
 
-      // Magic bytes check
       const magicCheck = validatePdfMagicBytes(arrayBuffer);
       if (!magicCheck.valid) {
         setState((prev) => ({
           ...prev,
-          isProcessing: false,
+          isComputingCrypto: false,
           error: magicCheck.error || "File is not a valid PDF document",
         }));
         return;
@@ -96,12 +244,10 @@ export default function IssuerPortal() {
       const commitment = calculateCommitment(credentialId, fileHash, salt);
 
       // Create standardized proof
-      const proof = createVerificationProof(
-        credentialId,
-        salt,
-        SEPOLIA_CHAIN_ID,
-        DEFAULT_CONTRACT_ADDRESS
-      );
+      let proof: VerificationProof | null = null;
+      if (contractConfigured) {
+        proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, CONFIGURED_CONTRACT_ADDRESS);
+      }
 
       setState((prev) => ({
         ...prev,
@@ -110,14 +256,19 @@ export default function IssuerPortal() {
         salt,
         commitment,
         proof,
-        isProcessing: false,
+        isComputingCrypto: false,
         error: null,
+        hasDownloadedProof: false,
+        userConfirmedSavedProof: false,
+        txHash: null,
+        confirmedReceipt: null,
+        confirmedOnChainRecord: null,
       }));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to process certificate";
       setState((prev) => ({
         ...prev,
-        isProcessing: false,
+        isComputingCrypto: false,
         error: message,
       }));
     }
@@ -129,6 +280,97 @@ export default function IssuerPortal() {
     setState((prev) => ({ ...prev, hasDownloadedProof: true }));
   };
 
+  // Submit on-chain registration transaction to CertTrace contract
+  const handleRegisterOnChain = async () => {
+    if (!contractConfigured) {
+      setState((prev) => ({
+        ...prev,
+        error: "Cannot submit: CertTrace contract address is not configured in the environment.",
+      }));
+      return;
+    }
+
+    if (!walletAddress || !isCorrectNetwork) {
+      setState((prev) => ({
+        ...prev,
+        error: "Please connect your MetaMask wallet to the Sepolia testnet first.",
+      }));
+      return;
+    }
+
+    if (!isAuthorizedIssuer) {
+      setState((prev) => ({
+        ...prev,
+        error: `Connected account (${walletAddress}) is not the authorized issuer configured on this contract.`,
+      }));
+      return;
+    }
+
+    if (!state.credentialId || !state.commitment) {
+      setState((prev) => ({
+        ...prev,
+        error: "Missing credential ID or cryptographic commitment.",
+      }));
+      return;
+    }
+
+    if (!state.hasDownloadedProof || !state.userConfirmedSavedProof) {
+      setState((prev) => ({
+        ...prev,
+        error: "Please download and confirm that you have saved the verification proof file before submitting.",
+      }));
+      return;
+    }
+
+    setState((prev) => ({
+      ...prev,
+      isSubmittingTx: true,
+      error: null,
+      txHash: null,
+      confirmedReceipt: null,
+      confirmedOnChainRecord: null,
+    }));
+
+    try {
+      const provider = getBrowserProvider();
+      if (!provider) {
+        throw new Error("MetaMask provider is not available.");
+      }
+      const signer = await provider.getSigner();
+
+      // Submit transaction to the contract
+      const { txHash, wait } = await submitIssueCredential(
+        signer,
+        state.credentialId,
+        state.commitment,
+        CONFIGURED_CONTRACT_ADDRESS
+      );
+
+      setState((prev) => ({ ...prev, txHash }));
+
+      // Wait for block confirmation receipt
+      const receipt = await wait();
+
+      // Confirm record exists on-chain
+      const record = await fetchOnChainCredential(state.credentialId, CONFIGURED_CONTRACT_ADDRESS);
+
+      setState((prev) => ({
+        ...prev,
+        isSubmittingTx: false,
+        confirmedReceipt: receipt,
+        confirmedOnChainRecord: record,
+        error: null,
+      }));
+    } catch (err: unknown) {
+      // Retain existing credentialId, salt, and proof on failure so issuer can retry
+      setState((prev) => ({
+        ...prev,
+        isSubmittingTx: false,
+        error: parseContractError(err),
+      }));
+    }
+  };
+
   const handleReset = () => {
     setState({
       file: null,
@@ -137,9 +379,14 @@ export default function IssuerPortal() {
       salt: null,
       commitment: null,
       proof: null,
-      isProcessing: false,
-      error: null,
       hasDownloadedProof: false,
+      userConfirmedSavedProof: false,
+      isComputingCrypto: false,
+      isSubmittingTx: false,
+      txHash: null,
+      confirmedReceipt: null,
+      confirmedOnChainRecord: null,
+      error: null,
     });
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -148,21 +395,123 @@ export default function IssuerPortal() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm">
-        <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
-          <span>🎓</span> Issuer Portal: Certificate Commitment & Proof Generation
-        </h2>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Compute the client-side cryptographic commitment for an academic certificate and generate the verification proof file.
-        </p>
-
-        {/* Security Alert */}
-        <div className="mt-4 p-3.5 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 rounded-xl text-xs text-blue-800 dark:text-blue-300 flex items-start gap-2.5">
-          <span className="text-base leading-none">🔒</span>
+      {/* Wallet & Contract Connection Bar */}
+      <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-100 dark:border-zinc-800 pb-4">
           <div>
-            <strong className="font-semibold">Privacy Preservation:</strong> Hashing is executed locally in your browser using the Web Crypto API. No PDF files, student names, or sensitive information are uploaded or stored externally.
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+              <span>🦊</span> Issuer Wallet Authorization
+            </h3>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+              Only the authorized wallet configured on the smart contract can register certificates.
+            </p>
+          </div>
+
+          <div>
+            {!walletAddress ? (
+              <button
+                onClick={handleConnectWallet}
+                disabled={isConnectingWallet}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs py-2 px-4 rounded-xl transition-colors disabled:opacity-50 flex items-center gap-1.5 shadow-sm"
+              >
+                {isConnectingWallet ? "Connecting..." : "Connect MetaMask"}
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="text-xs font-mono bg-zinc-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl border border-zinc-200 dark:border-zinc-700">
+                  <span className="text-zinc-500">Connected: </span>
+                  <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                    {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setWalletAddress(null)}
+                  className="text-xs text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 py-1.5 px-2"
+                >
+                  Disconnect
+                </button>
+              </div>
+            )}
           </div>
         </div>
+
+        {/* Missing MetaMask Notification */}
+        {!isMetaMaskInstalled() && (
+          <div className="p-3.5 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 rounded-xl text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2">
+            <span>🦊</span>
+            <div>
+              <strong>MetaMask extension not found:</strong> Install the{" "}
+              <a
+                href="https://metamask.io/download/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-semibold hover:text-amber-950 dark:hover:text-amber-100"
+              >
+                MetaMask browser extension
+              </a>{" "}
+              to connect your authorized issuer account and sign blockchain transactions.
+            </div>
+          </div>
+        )}
+
+        {/* Contract & Network Diagnostics */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <div className="p-3 bg-zinc-50 dark:bg-zinc-950 rounded-xl border border-zinc-200 dark:border-zinc-800">
+            <span className="text-zinc-500 dark:text-zinc-400 block font-medium mb-1">
+              Smart Contract Deployment:
+            </span>
+            {contractConfigured ? (
+              <span className="font-mono text-zinc-800 dark:text-zinc-200 break-all select-all">
+                {CONFIGURED_CONTRACT_ADDRESS}
+              </span>
+            ) : (
+              <span className="text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1">
+                ⚠️ Not Configured (Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env.local)
+              </span>
+            )}
+          </div>
+
+          <div className="p-3 bg-zinc-50 dark:bg-zinc-950 rounded-xl border border-zinc-200 dark:border-zinc-800">
+            <span className="text-zinc-500 dark:text-zinc-400 block font-medium mb-1">
+              Network & Authorization Status:
+            </span>
+            {!walletAddress ? (
+              <span className="text-zinc-500">Wallet not connected</span>
+            ) : !isCorrectNetwork ? (
+              <div className="flex items-center justify-between">
+                <span className="text-red-600 dark:text-red-400 font-medium">
+                  Wrong Network (ID: {walletChainId})
+                </span>
+                <button
+                  onClick={handleSwitchNetwork}
+                  className="bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-medium py-1 px-2.5 rounded-lg"
+                >
+                  Switch to Sepolia
+                </button>
+              </div>
+            ) : isCheckingIssuer ? (
+              <span className="text-zinc-500">Verifying authorization...</span>
+            ) : isAuthorizedIssuer ? (
+              <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
+                ✓ Authorized Issuer Wallet Verified
+              </span>
+            ) : (
+              <span className="text-red-600 dark:text-red-400 font-medium">
+                ✗ Unauthorized Wallet (Mismatch with Contract Issuer)
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Main Issuer Portal Card */}
+      <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm">
+        <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50 flex items-center gap-2">
+          <span>🎓</span> Certificate Issuance & On-Chain Registration
+        </h2>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Compute client-side cryptographic commitment, download the mandatory proof, and register the credential on the Sepolia blockchain.
+        </p>
 
         {/* File Selection */}
         <div className="mt-6">
@@ -221,21 +570,21 @@ export default function IssuerPortal() {
           </div>
         )}
 
-        {/* Action Button */}
+        {/* Action Button: Compute Commitment */}
         {state.file && !state.commitment && (
           <div className="mt-6 flex gap-3">
             <button
               onClick={processCertificate}
-              disabled={state.isProcessing}
+              disabled={state.isComputingCrypto}
               className="flex-1 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-white text-white dark:text-zinc-900 font-medium py-2.5 px-4 rounded-xl text-sm transition-all disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {state.isProcessing ? (
+              {state.isComputingCrypto ? (
                 <>
                   <span className="animate-spin">⏳</span> Computing SHA-256 & Commitment...
                 </>
               ) : (
                 <>
-                  <span>⚡</span> Calculate Commitment & Generate Proof
+                  <span>⚡</span> Calculate Commitment & Prepare Proof
                 </>
               )}
             </button>
@@ -249,17 +598,27 @@ export default function IssuerPortal() {
         )}
       </div>
 
-      {/* Issuance Results & Proof Card */}
-      {state.commitment && state.proof && (
+      {/* Issuance Results & Blockchain Registration Card */}
+      {state.commitment && (
         <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm space-y-6">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
               <span className="text-emerald-500 text-xl">✓</span>
-              Cryptographic Commitment Computed
+              Cryptographic Commitment Prepared
             </h3>
-            <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
-              Ready for Blockchain Registration
-            </span>
+            {state.confirmedReceipt ? (
+              <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+                ✓ Confirmed On Sepolia Blockchain
+              </span>
+            ) : contractConfigured ? (
+              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-50 text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                Awaiting Blockchain Registration
+              </span>
+            ) : (
+              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                Blockchain Not Configured
+              </span>
+            )}
           </div>
 
           {/* Cryptographic Parameters Grid */}
@@ -293,8 +652,8 @@ export default function IssuerPortal() {
 
             <div className="p-3.5 bg-indigo-50/60 dark:bg-indigo-950/30 rounded-xl border border-indigo-200 dark:border-indigo-900/50">
               <div className="text-indigo-700 dark:text-indigo-400 font-sans text-xs mb-1 font-semibold flex items-center justify-between">
-                <span>Cryptographic Commitment (solidityPackedKeccak256 - CERTTRACE_V1)</span>
-                <span className="text-[10px] font-normal px-2 py-0.5 bg-indigo-100 dark:bg-indigo-900/60 rounded">On-Chain Payload</span>
+                <span>Cryptographic Commitment (solidityPackedKeccak256)</span>
+                <span className="text-[10px] font-normal px-2 py-0.5 bg-indigo-100 dark:bg-indigo-900/60 rounded">Payload</span>
               </div>
               <div className="text-indigo-950 dark:text-indigo-200 break-all font-semibold select-all">
                 {state.commitment}
@@ -302,38 +661,143 @@ export default function IssuerPortal() {
             </div>
           </div>
 
-          {/* Warning Banner */}
-          <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 rounded-xl text-xs text-amber-900 dark:text-amber-200 space-y-1.5">
+          {/* Download Proof & Retention Warning (Required before submission) */}
+          <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 rounded-xl text-xs text-amber-900 dark:text-amber-200 space-y-3">
             <div className="flex items-center gap-1.5 font-semibold text-amber-800 dark:text-amber-300">
-              <span>⚠️</span> Mandatory User Action: Download & Retain Proof
+              <span>⚠️</span> Mandatory Proof Download & Confirmation
             </div>
             <p>
-              You <strong>must retain both the original PDF and the generated JSON proof file</strong> for subsequent verification.
-              Without this proof file (which stores your private salt and credential ID), the on-chain commitment cannot be reconstructed or proven.
+              The verification proof stores the private salt and credential ID required for future verification. You must download and safely store this file before submitting the blockchain transaction.
             </p>
+            <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between pt-1">
+              <button
+                type="button"
+                onClick={handleDownloadProof}
+                disabled={!state.proof}
+                className="bg-amber-700 hover:bg-amber-600 text-white font-medium py-2 px-4 rounded-xl text-xs transition-colors flex items-center gap-1.5"
+              >
+                <span>💾</span> Download Proof File (.json)
+              </button>
+
+              <label className="flex items-center gap-2 cursor-pointer select-none text-xs font-medium text-amber-950 dark:text-amber-100">
+                <input
+                  type="checkbox"
+                  checked={state.userConfirmedSavedProof}
+                  onChange={(e) => setState((prev) => ({ ...prev, userConfirmedSavedProof: e.target.checked }))}
+                  className="rounded border-amber-400 text-amber-600 focus:ring-amber-500 h-4 w-4"
+                />
+                <span>I confirm I have downloaded and securely saved this proof file</span>
+              </label>
+            </div>
           </div>
 
-          {/* Action Buttons */}
-          <div className="flex flex-col sm:flex-row gap-3 pt-2">
-            <button
-              onClick={handleDownloadProof}
-              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-3 px-5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2 shadow-sm"
-            >
-              <span>💾</span> Download Verification Proof (.json)
-            </button>
+          {/* Blockchain Submission Section */}
+          <div className="space-y-4 pt-2 border-t border-zinc-100 dark:border-zinc-800">
+            {!state.confirmedReceipt ? (
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  onClick={handleRegisterOnChain}
+                  disabled={
+                    !contractConfigured ||
+                    !walletAddress ||
+                    !isCorrectNetwork ||
+                    !isAuthorizedIssuer ||
+                    !state.userConfirmedSavedProof ||
+                    state.isSubmittingTx
+                  }
+                  className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-3 px-5 rounded-xl text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-sm"
+                >
+                  {state.isSubmittingTx ? (
+                    <>
+                      <span className="animate-spin">⏳</span> Submitting Transaction to Sepolia...
+                    </>
+                  ) : (
+                    <>
+                      <span>⛓️</span> Submit issueCredential() to Blockchain
+                    </>
+                  )}
+                </button>
+
+                {!contractConfigured && (
+                  <p className="text-xs text-center text-amber-600 dark:text-amber-400">
+                    Blockchain registration is disabled: CertTrace contract address is not configured.
+                  </p>
+                )}
+                {contractConfigured && (!walletAddress || !isCorrectNetwork || !isAuthorizedIssuer) && (
+                  <p className="text-xs text-center text-zinc-500 dark:text-zinc-400">
+                    Connect an authorized issuer wallet on Sepolia to enable blockchain registration.
+                  </p>
+                )}
+                {contractConfigured && walletAddress && isAuthorizedIssuer && !state.userConfirmedSavedProof && (
+                  <p className="text-xs text-center text-amber-600 dark:text-amber-400">
+                    Please download the proof file and check the confirmation box above to proceed.
+                  </p>
+                )}
+              </div>
+            ) : (
+              /* Confirmed On-Chain Registration State */
+              <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 rounded-xl space-y-3 text-xs">
+                <div className="flex items-center gap-2 font-semibold text-emerald-800 dark:text-emerald-300 text-sm">
+                  <span>✓</span> Credential Confirmed on Sepolia Blockchain
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-zinc-700 dark:text-zinc-300">
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400">Block Number: </span>
+                    <span className="font-mono font-medium">{state.confirmedReceipt.blockNumber}</span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-500 dark:text-zinc-400">Timestamp: </span>
+                    <span className="font-mono font-medium">
+                      {state.confirmedOnChainRecord?.timestamp
+                        ? new Date(state.confirmedOnChainRecord.timestamp * 1000).toLocaleString()
+                        : "Confirmed"}
+                    </span>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <span className="text-zinc-500 dark:text-zinc-400">Transaction Hash: </span>
+                    {state.txHash && (
+                      <a
+                        href={getExplorerTxUrl(state.txHash)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-mono text-indigo-600 dark:text-indigo-400 underline hover:no-underline break-all"
+                      >
+                        {state.txHash} ↗
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Pending Transaction Tracker */}
+            {state.isSubmittingTx && state.txHash && (
+              <div className="p-3 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl text-xs text-zinc-600 dark:text-zinc-400 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="animate-spin">⏳</span>
+                  <span>Transaction broadcast! Waiting for block confirmation...</span>
+                </div>
+                <a
+                  href={getExplorerTxUrl(state.txHash)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-indigo-600 dark:text-indigo-400 underline hover:no-underline"
+                >
+                  View on Sepolia Etherscan ↗
+                </a>
+              </div>
+            )}
+          </div>
+
+          <div className="pt-2 flex justify-end">
             <button
               onClick={handleReset}
-              className="py-3 px-5 border border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-xl text-sm transition-colors"
+              className="py-2.5 px-4 border border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-xl text-xs font-medium transition-colors"
             >
               Issue Another Certificate
             </button>
           </div>
-
-          {state.hasDownloadedProof && (
-            <div className="text-xs text-center text-emerald-600 dark:text-emerald-400 font-medium">
-              ✓ Proof file downloaded successfully. Ready for transaction submission to CertTrace contract on Sepolia.
-            </div>
-          )}
         </div>
       )}
     </div>

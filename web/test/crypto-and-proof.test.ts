@@ -25,11 +25,13 @@ import {
 
 import {
   SEPOLIA_CHAIN_ID,
-  DEFAULT_CONTRACT_ADDRESS,
   SUPPORTED_PROOF_VERSION,
   MAX_PDF_SIZE_BYTES,
   MIN_PDF_SIZE_BYTES,
 } from "../lib/config";
+
+// Explicit test fixture address for isolated unit testing
+const TEST_FIXTURE_CONTRACT_ADDRESS = "0x1234567890123456789012345678901234567890";
 
 // Helper to create valid mock PDF bytes
 function createMockPdf(content: string = "Sample Academic Certificate Content"): Uint8Array {
@@ -101,7 +103,7 @@ test("5. Issuance and verification calculate identical commitments", async () =>
   const issuerCommitment = calculateCommitment(credentialId, issuerFileHash, salt);
 
   // Generate proof file to give to student
-  const proof = createVerificationProof(credentialId, salt);
+  const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
 
   // Verifier step: receives original PDF and proof file, reconstructs commitment
   const verifierFileHash = await hashFileBytes(originalPdf);
@@ -128,13 +130,13 @@ test("5. Issuance and verification calculate identical commitments", async () =>
 test("6. Proof creation and validation - valid proof", () => {
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
-  const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, DEFAULT_CONTRACT_ADDRESS);
+  const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
 
   assert.equal(proof.version, SUPPORTED_PROOF_VERSION);
   assert.equal(proof.credentialId, credentialId.toLowerCase());
   assert.equal(proof.salt, salt.toLowerCase());
   assert.equal(proof.chainId, SEPOLIA_CHAIN_ID);
-  assert.equal(proof.contractAddress.toLowerCase(), DEFAULT_CONTRACT_ADDRESS.toLowerCase());
+  assert.equal(proof.contractAddress.toLowerCase(), TEST_FIXTURE_CONTRACT_ADDRESS.toLowerCase());
   assert.equal(isValidEthereumAddress(proof.contractAddress), true);
   assert.equal(isValidEthereumAddress("invalid-address"), false);
 
@@ -143,7 +145,7 @@ test("6. Proof creation and validation - valid proof", () => {
   assert.equal("studentName" in proof, false);
   assert.equal("pdf" in proof, false);
 
-  const validation = validateVerificationProof(proof, SEPOLIA_CHAIN_ID, DEFAULT_CONTRACT_ADDRESS);
+  const validation = validateVerificationProof(proof, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(validation.success, true);
   if (validation.success) {
     assert.equal(validation.proof.credentialId, credentialId.toLowerCase());
@@ -172,9 +174,9 @@ test("7. Malformed proof rejection", () => {
     version: 1,
     salt: generateRandomBytes32(),
     chainId: SEPOLIA_CHAIN_ID,
-    contractAddress: DEFAULT_CONTRACT_ADDRESS,
+    contractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
   };
-  const res4 = validateVerificationProof(missingCred);
+  const res4 = validateVerificationProof(missingCred, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(res4.success, false);
   assert.match(res4.error!, /credentialId/);
 
@@ -183,9 +185,9 @@ test("7. Malformed proof rejection", () => {
     version: 1,
     credentialId: generateRandomBytes32(),
     chainId: SEPOLIA_CHAIN_ID,
-    contractAddress: DEFAULT_CONTRACT_ADDRESS,
+    contractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
   };
-  const res5 = validateVerificationProof(missingSalt);
+  const res5 = validateVerificationProof(missingSalt, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(res5.success, false);
   assert.match(res5.error!, /salt/);
 
@@ -195,9 +197,9 @@ test("7. Malformed proof rejection", () => {
     credentialId: "0x1234",
     salt: generateRandomBytes32(),
     chainId: SEPOLIA_CHAIN_ID,
-    contractAddress: DEFAULT_CONTRACT_ADDRESS,
+    contractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
   };
-  const res6 = validateVerificationProof(invalidBytes32);
+  const res6 = validateVerificationProof(invalidBytes32, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(res6.success, false);
   assert.match(res6.error!, /credentialId/);
 
@@ -207,9 +209,9 @@ test("7. Malformed proof rejection", () => {
     credentialId: "0x0000000000000000000000000000000000000000000000000000000000000000",
     salt: generateRandomBytes32(),
     chainId: SEPOLIA_CHAIN_ID,
-    contractAddress: DEFAULT_CONTRACT_ADDRESS,
+    contractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
   };
-  const res7 = validateVerificationProof(zeroBytes32);
+  const res7 = validateVerificationProof(zeroBytes32, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(res7.success, false);
   assert.match(res7.error!, /non-zero/);
 });
@@ -224,9 +226,9 @@ test("8. Incorrect chain ID and contract address rejection", () => {
     credentialId,
     salt,
     chainId: 1,
-    contractAddress: DEFAULT_CONTRACT_ADDRESS,
+    contractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
   };
-  const chainRes = validateVerificationProof(wrongChainProof, SEPOLIA_CHAIN_ID, DEFAULT_CONTRACT_ADDRESS);
+  const chainRes = validateVerificationProof(wrongChainProof, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(chainRes.success, false);
   assert.match(chainRes.error!, /chain ID/i);
 
@@ -241,7 +243,7 @@ test("8. Incorrect chain ID and contract address rejection", () => {
   const contractRes = validateVerificationProof(
     wrongContractProof,
     SEPOLIA_CHAIN_ID,
-    DEFAULT_CONTRACT_ADDRESS
+    TEST_FIXTURE_CONTRACT_ADDRESS
   );
   assert.equal(contractRes.success, false);
   assert.match(contractRes.error!, /contract address reference/i);
@@ -268,9 +270,9 @@ test("9. Unsupported proof version rejection", () => {
     credentialId,
     salt,
     chainId: SEPOLIA_CHAIN_ID,
-    contractAddress: DEFAULT_CONTRACT_ADDRESS,
+    contractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
   };
-  const res = validateVerificationProof(wrongVersionProof);
+  const res = validateVerificationProof(wrongVersionProof, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(res.success, false);
   assert.match(res.error!, /Unsupported proof version/i);
 });
@@ -284,10 +286,10 @@ test("10. Forbidden sensitive fields in proof rejection", () => {
     credentialId,
     salt,
     chainId: SEPOLIA_CHAIN_ID,
-    contractAddress: DEFAULT_CONTRACT_ADDRESS,
+    contractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
     privateKey: "0xabcdef...",
   };
-  const res = validateVerificationProof(taintedProof);
+  const res = validateVerificationProof(taintedProof, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
   assert.equal(res.success, false);
   assert.match(res.error!, /Security violation: proof contains forbidden sensitive key 'privateKey'/);
 });
@@ -343,7 +345,7 @@ test("12. Complete verification preparation workflow (End-to-End)", async () => 
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
 
-  const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, DEFAULT_CONTRACT_ADDRESS);
+  const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_FIXTURE_CONTRACT_ADDRESS);
 
   // Run verification preparation
   const result = await prepareCertificateVerification({
@@ -351,7 +353,7 @@ test("12. Complete verification preparation workflow (End-to-End)", async () => 
     pdfBuffer: validPdfBytes,
     proofInput: proof,
     expectedChainId: SEPOLIA_CHAIN_ID,
-    expectedContractAddress: DEFAULT_CONTRACT_ADDRESS,
+    expectedContractAddress: TEST_FIXTURE_CONTRACT_ADDRESS,
   });
 
   assert.equal(result.success, true);

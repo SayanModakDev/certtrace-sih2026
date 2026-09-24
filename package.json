@@ -1,0 +1,15 @@
+{
+  "name": "certtrace-sih2026",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CertTrace — Blockchain-based academic certificate issuance and integrity verification platform for SIH 2026.",
+  "scripts": {
+    "dev": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "start": "npm --prefix web run start",
+    "lint": "npm --prefix web run lint",
+    "test": "npm --prefix blockchain test && npm --prefix web test",
+    "test:web": "npm --prefix web test",
+    "test:blockchain": "npm --prefix blockchain test"
+  }
+}

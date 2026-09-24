@@ -3,10 +3,15 @@
 import React, { useState } from "react";
 import IssuerPortal from "../components/IssuerPortal";
 import VerifierPortal from "../components/VerifierPortal";
-import { DEFAULT_CONTRACT_ADDRESS, SEPOLIA_CHAIN_ID } from "../lib/config";
+import {
+  CONFIGURED_CONTRACT_ADDRESS,
+  SEPOLIA_CHAIN_ID,
+  isContractConfigured,
+} from "../lib/config";
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<"issuer" | "verifier">("issuer");
+  const contractConfigured = isContractConfigured();
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col justify-between selection:bg-indigo-500 selection:text-white">
@@ -37,9 +42,18 @@ export default function Home() {
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
             <span className="text-zinc-600 dark:text-zinc-400">Sepolia (ID: {SEPOLIA_CHAIN_ID})</span>
             <span className="text-zinc-400 dark:text-zinc-600">|</span>
-            <span className="text-zinc-700 dark:text-zinc-300 truncate max-w-32.5 sm:max-w-40" title={DEFAULT_CONTRACT_ADDRESS}>
-              {DEFAULT_CONTRACT_ADDRESS.slice(0, 6)}...{DEFAULT_CONTRACT_ADDRESS.slice(-4)}
-            </span>
+            {contractConfigured ? (
+              <span
+                className="text-zinc-700 dark:text-zinc-300 truncate max-w-32.5 sm:max-w-40 font-medium"
+                title={CONFIGURED_CONTRACT_ADDRESS}
+              >
+                {CONFIGURED_CONTRACT_ADDRESS.slice(0, 6)}...{CONFIGURED_CONTRACT_ADDRESS.slice(-4)}
+              </span>
+            ) : (
+              <span className="text-amber-600 dark:text-amber-400 font-medium">
+                Contract: Not Configured
+              </span>
+            )}
           </div>
         </div>
       </header>
