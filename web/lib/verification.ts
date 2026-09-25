@@ -1,14 +1,12 @@
 import type { Provider } from "ethers";
-import { hashFileBytes, calculateCommitment, normalizeAddress } from "./crypto";
+import { hashFileBytes, calculateCommitment } from "./crypto";
 import { validateVerificationProof, VerificationProof, ProofValidationResult } from "./proof";
 import { validatePdfMagicBytes, validatePdfMetadata } from "./validation";
 import {
   SEPOLIA_CHAIN_ID,
   CONFIGURED_CONTRACT_ADDRESS,
-  CONFIGURED_CONTRACT_VERSION,
-  ContractVersion,
 } from "./config";
-import { fetchOnChainCredential, getAuthorizedIssuer, OnChainCredentialRecord, parseContractError } from "./contract";
+import { checkIssuerAuthorization, fetchOnChainCredential, OnChainCredentialRecord, parseContractError } from "./contract";
 import { credentialIdMatchesQrEntry, parseVerificationCredentialId } from "./qr";
 
 export type VerificationOutcome =
@@ -26,7 +24,6 @@ export interface VerificationResult {
   reconstructedCommitment?: string;
   proof?: VerificationProof;
   onChainRecord?: OnChainCredentialRecord;
-  authorizedIssuer?: string;
   isIssuerAuthorized?: boolean;
   contractAddress?: string;
   chainId?: number;
@@ -59,7 +56,6 @@ export interface VerifyCertificateParams {
   expectedChainId?: number;
   expectedContractAddress?: string;
   provider?: Provider;
-  contractVersion?: ContractVersion;
   expectedCredentialId?: string | null;
 }
 
@@ -158,7 +154,7 @@ export async function prepareCertificateVerification({
     reconstructedCommitment,
     proof,
     notice:
-      "Cryptographic commitment reconstructed successfully from local PDF bytes and proof. Smart contract verification on Sepolia is pending integration.",
+      "Cryptographic commitment reconstructed locally. Continue with the configured CertTraceRegistry lookup to establish on-chain status.",
   };
 }
 
@@ -175,7 +171,6 @@ export async function verifyCertificateWithBlockchain({
   expectedChainId = SEPOLIA_CHAIN_ID,
   expectedContractAddress = CONFIGURED_CONTRACT_ADDRESS,
   provider,
-  contractVersion = CONFIGURED_CONTRACT_VERSION,
   expectedCredentialId,
 }: VerifyCertificateParams): Promise<VerificationResult> {
   const activeContractAddress = expectedContractAddress || CONFIGURED_CONTRACT_ADDRESS;
@@ -288,14 +283,11 @@ export async function verifyCertificateWithBlockchain({
 
   // 7. Query live blockchain via read-only provider
   let onChainRecord: OnChainCredentialRecord;
-  let authorizedIssuer: string | undefined;
-
   try {
     onChainRecord = await fetchOnChainCredential(
       proof.credentialId,
       activeContractAddress,
-      provider,
-      contractVersion
+      provider
     );
   } catch (err: unknown) {
     const errorMsg = parseContractError(err);
@@ -312,21 +304,21 @@ export async function verifyCertificateWithBlockchain({
     };
   }
 
-  // Fetch contract's authorized issuer for verification display
+  // Current authorization is informational; historical issuance remains attributable
+  // to the stored issuing wallet even if an admin later removes that wallet.
+  let isIssuerAuthorized = false;
   try {
-    authorizedIssuer = await getAuthorizedIssuer(activeContractAddress, provider, contractVersion);
+    isIssuerAuthorized = await checkIssuerAuthorization(
+      onChainRecord.issuer,
+      activeContractAddress,
+      provider
+    );
   } catch {
-    // Non-fatal if issuer query fails
+    // Non-fatal if the secondary authorization query fails.
   }
 
-  const isIssuerAuthorized = Boolean(
-    authorizedIssuer &&
-    onChainRecord.issuer &&
-    normalizeAddress(authorizedIssuer) === normalizeAddress(onChainRecord.issuer)
-  );
-
   // 8. Distinguish verification outcomes
-  if (!onChainRecord.isRegistered || onChainRecord.timestamp === 0) {
+  if (!onChainRecord.exists || onChainRecord.issuedAt === 0) {
     return {
       outcome: "UNKNOWN_CREDENTIAL",
       headline: "Unknown Credential",
@@ -345,7 +337,7 @@ export async function verifyCertificateWithBlockchain({
   const matches =
     onChainRecord.commitment.toLowerCase() === reconstructedCommitment.toLowerCase();
 
-  if (matches && onChainRecord.isRevoked) {
+  if (matches && onChainRecord.revoked) {
     return {
       outcome: "REVOKED_REGISTERED_DOCUMENT",
       headline: "Revoked — Registered Document",
@@ -355,7 +347,6 @@ export async function verifyCertificateWithBlockchain({
       reconstructedCommitment,
       proof,
       onChainRecord,
-      authorizedIssuer,
       isIssuerAuthorized,
       contractAddress: activeContractAddress,
       chainId: expectedChainId,
@@ -372,7 +363,6 @@ export async function verifyCertificateWithBlockchain({
       reconstructedCommitment,
       proof,
       onChainRecord,
-      authorizedIssuer,
       isIssuerAuthorized,
       contractAddress: activeContractAddress,
       chainId: expectedChainId,
@@ -387,7 +377,6 @@ export async function verifyCertificateWithBlockchain({
       reconstructedCommitment,
       proof,
       onChainRecord,
-      authorizedIssuer,
       isIssuerAuthorized,
       contractAddress: activeContractAddress,
       chainId: expectedChainId,

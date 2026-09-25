@@ -362,6 +362,6 @@ test("12. Complete verification preparation workflow (End-to-End)", async () => 
     assert.equal(result.fileHash, fileHash);
     const expectedCommitment = calculateCommitment(credentialId, fileHash, salt);
     assert.equal(result.reconstructedCommitment, expectedCommitment);
-    assert.match(result.notice, /Sepolia is pending integration/);
+    assert.match(result.notice, /configured CertTraceRegistry lookup/);
   }
 });

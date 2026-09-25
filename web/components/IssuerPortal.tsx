@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { ethers } from "ethers";
-import { hashFileBytes, generateRandomBytes32, calculateCommitment, normalizeAddress, isValidBytes32 } from "../lib/crypto";
+import { hashFileBytes, generateRandomBytes32, calculateCommitment, normalizeAddress, isValidBytes32, isValidEthereumAddress } from "../lib/crypto";
 import { createVerificationProof, downloadProofFile, VerificationProof } from "../lib/proof";
 import { validatePdfMetadata, validatePdfMagicBytes } from "../lib/validation";
 import {
@@ -10,20 +10,23 @@ import {
   CONFIGURED_CONTRACT_ADDRESS,
   isContractConfigured,
   getExplorerTxUrl,
-  CONFIGURED_CONTRACT_VERSION,
-  contractSupportsRevocation,
 } from "../lib/config";
 import {
   isMetaMaskInstalled,
   getBrowserProvider,
   requestConnectWallet,
   switchToSepolia,
-  getAuthorizedIssuer,
+  checkIssuerAuthorization,
+  getRegistryAdmin,
   submitIssueCredential,
   fetchOnChainCredential,
   parseContractError,
   OnChainCredentialRecord,
   submitRevokeCredential,
+  submitAuthorizeIssuer,
+  submitRemoveIssuer,
+  assertIssuanceReadBack,
+  isRegistryAdmin,
 } from "../lib/contract";
 import { createVerificationUrl, downloadQrImage, generateVerificationQrDataUrl } from "../lib/qr";
 
@@ -73,7 +76,8 @@ export default function IssuerPortal() {
   // Wallet Connection States
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [walletChainId, setWalletChainId] = useState<number | null>(null);
-  const [contractAuthorizedIssuer, setContractAuthorizedIssuer] = useState<string | null>(null);
+  const [issuerAuthorized, setIssuerAuthorized] = useState(false);
+  const [adminAddress, setAdminAddress] = useState<string | null>(null);
   const [isConnectingWallet, setIsConnectingWallet] = useState(false);
   const [isCheckingIssuer, setIsCheckingIssuer] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
@@ -82,6 +86,11 @@ export default function IssuerPortal() {
   const [revocationTxHash, setRevocationTxHash] = useState<string | null>(null);
   const [revocationConfirmed, setRevocationConfirmed] = useState<OnChainCredentialRecord | null>(null);
   const [revocationError, setRevocationError] = useState<string | null>(null);
+  const [managedIssuer, setManagedIssuer] = useState("");
+  const [managedIssuerStatus, setManagedIssuerStatus] = useState<boolean | null>(null);
+  const [adminActionPending, setAdminActionPending] = useState(false);
+  const [adminTxHash, setAdminTxHash] = useState<string | null>(null);
+  const [adminError, setAdminError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -90,13 +99,9 @@ export default function IssuerPortal() {
   }, []);
 
   const contractConfigured = isContractConfigured();
-  const revocationSupported = contractSupportsRevocation();
   const isCorrectNetwork = walletChainId === SEPOLIA_CHAIN_ID;
-  const isAuthorizedIssuer = Boolean(
-    walletAddress &&
-    contractAuthorizedIssuer &&
-    normalizeAddress(walletAddress) === normalizeAddress(contractAuthorizedIssuer)
-  );
+  const isAuthorizedIssuer = Boolean(walletAddress && issuerAuthorized);
+  const isAdmin = isRegistryAdmin(walletAddress, adminAddress);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,8 +111,7 @@ export default function IssuerPortal() {
     try {
       const verificationUrl = createVerificationUrl(
         state.credentialId,
-        undefined,
-        CONFIGURED_CONTRACT_VERSION
+        undefined
       );
       setState((prev) => ({ ...prev, verificationUrl, qrDataUrl: null, qrError: null }));
 
@@ -136,22 +140,27 @@ export default function IssuerPortal() {
   }, [state.confirmedReceipt, state.credentialId]);
 
   // Check on-chain authorized issuer when contract or wallet changes
-  const checkOnChainIssuer = useCallback(async () => {
+  const checkRegistryAccess = useCallback(async (account?: string | null) => {
     if (!contractConfigured) return;
     setIsCheckingIssuer(true);
     try {
-      const issuer = await getAuthorizedIssuer();
-      setContractAuthorizedIssuer(issuer);
+      const [admin, authorized] = await Promise.all([
+        getRegistryAdmin(),
+        account ? checkIssuerAuthorization(account) : Promise.resolve(false),
+      ]);
+      setAdminAddress(admin);
+      setIssuerAuthorized(authorized);
     } catch {
-      setContractAuthorizedIssuer(null);
+      setAdminAddress(null);
+      setIssuerAuthorized(false);
     } finally {
       setIsCheckingIssuer(false);
     }
   }, [contractConfigured]);
 
   useEffect(() => {
-    checkOnChainIssuer();
-  }, [checkOnChainIssuer]);
+    checkRegistryAccess(walletAddress);
+  }, [checkRegistryAccess, walletAddress]);
 
   // Setup MetaMask event listeners
   useEffect(() => {
@@ -164,10 +173,11 @@ export default function IssuerPortal() {
 
     const handleAccountsChanged = (accounts: unknown) => {
       const accList = accounts as string[];
-      if (accList && accList.length > 0) {
-        setWalletAddress(normalizeAddress(accList[0]));
-      } else {
-        setWalletAddress(null);
+        if (accList && accList.length > 0) {
+          setWalletAddress(normalizeAddress(accList[0]));
+        } else {
+          setWalletAddress(null);
+          setIssuerAuthorized(false);
       }
     };
 
@@ -206,7 +216,7 @@ export default function IssuerPortal() {
       const { address, chainId } = await requestConnectWallet();
       setWalletAddress(address);
       setWalletChainId(chainId);
-      await checkOnChainIssuer();
+      await checkRegistryAccess(address);
     } catch (err: unknown) {
       setState((prev) => ({
         ...prev,
@@ -422,7 +432,12 @@ export default function IssuerPortal() {
       const receipt = await wait();
 
       // Confirm record exists on-chain
-      const record = await fetchOnChainCredential(state.credentialId, CONFIGURED_CONTRACT_ADDRESS);
+      const record = await fetchOnChainCredential(
+        state.credentialId,
+        CONFIGURED_CONTRACT_ADDRESS,
+        provider
+      );
+      assertIssuanceReadBack(record, state.commitment, walletAddress);
 
       setState((prev) => ({
         ...prev,
@@ -443,16 +458,12 @@ export default function IssuerPortal() {
 
   const handleRevokeCredential = async () => {
     const credentialId = revocationCredentialId.trim();
-    if (!revocationSupported) {
-      setRevocationError("Revocation is unavailable on the configured CertTrace V1 deployment.");
-      return;
-    }
     if (!isValidBytes32(credentialId)) {
       setRevocationError("Enter a valid non-zero bytes32 credential ID.");
       return;
     }
-    if (!walletAddress || !isCorrectNetwork || !isAuthorizedIssuer) {
-      setRevocationError("Connect the authorized issuer wallet on Sepolia before revoking.");
+    if (!walletAddress || !isCorrectNetwork) {
+      setRevocationError("Connect the original issuing wallet on Sepolia before revoking.");
       return;
     }
 
@@ -465,11 +476,19 @@ export default function IssuerPortal() {
       const provider = getBrowserProvider();
       if (!provider) throw new Error("MetaMask provider is not available.");
       const signer = await provider.getSigner();
+      const original = await fetchOnChainCredential(
+        credentialId,
+        CONFIGURED_CONTRACT_ADDRESS,
+        provider
+      );
+      if (!original.exists) throw new Error("This credential ID is not registered in CertTrace.");
+      if (normalizeAddress(original.issuer) !== normalizeAddress(walletAddress)) {
+        throw new Error("Only the wallet that originally issued this credential can revoke it.");
+      }
       const { txHash, wait } = await submitRevokeCredential(
         signer,
         credentialId,
-        CONFIGURED_CONTRACT_ADDRESS,
-        CONFIGURED_CONTRACT_VERSION
+        CONFIGURED_CONTRACT_ADDRESS
       );
 
       setRevocationTxHash(txHash);
@@ -477,10 +496,15 @@ export default function IssuerPortal() {
       const record = await fetchOnChainCredential(
         credentialId,
         CONFIGURED_CONTRACT_ADDRESS,
-        undefined,
-        CONFIGURED_CONTRACT_VERSION
+        provider
       );
-      if (!record.isRegistered || !record.isRevoked) {
+      if (
+        !record.exists ||
+        !record.revoked ||
+        record.commitment.toLowerCase() !== original.commitment.toLowerCase() ||
+        normalizeAddress(record.issuer) !== normalizeAddress(original.issuer) ||
+        record.issuedAt !== original.issuedAt
+      ) {
         throw new Error("The confirmed transaction did not produce a revoked credential state.");
       }
       setRevocationConfirmed(record);
@@ -488,6 +512,55 @@ export default function IssuerPortal() {
       setRevocationError(parseContractError(error));
     } finally {
       setIsSubmittingRevocation(false);
+    }
+  };
+
+  const refreshManagedIssuer = async (address = managedIssuer.trim()) => {
+    if (!isValidEthereumAddress(address)) {
+      setManagedIssuerStatus(null);
+      setAdminError("Enter a valid Ethereum address.");
+      return;
+    }
+    setAdminError(null);
+    try {
+      setManagedIssuerStatus(await checkIssuerAuthorization(address));
+    } catch (error: unknown) {
+      setManagedIssuerStatus(null);
+      setAdminError(parseContractError(error));
+    }
+  };
+
+  const handleIssuerManagement = async (action: "authorize" | "remove") => {
+    const address = managedIssuer.trim();
+    if (!isAdmin || !isCorrectNetwork || !isValidEthereumAddress(address)) {
+      setAdminError("Connect the registry admin on Sepolia and enter a valid issuer address.");
+      return;
+    }
+    setAdminActionPending(true);
+    setAdminTxHash(null);
+    setAdminError(null);
+    try {
+      const provider = getBrowserProvider();
+      if (!provider) throw new Error("MetaMask provider is not available.");
+      const signer = await provider.getSigner();
+      const submitted = action === "authorize"
+        ? await submitAuthorizeIssuer(signer, address, CONFIGURED_CONTRACT_ADDRESS)
+        : await submitRemoveIssuer(signer, address, CONFIGURED_CONTRACT_ADDRESS);
+      setAdminTxHash(submitted.txHash);
+      await submitted.wait();
+      const expected = action === "authorize";
+      const actual = await checkIssuerAuthorization(
+        address,
+        CONFIGURED_CONTRACT_ADDRESS,
+        provider
+      );
+      if (actual !== expected) throw new Error("Issuer authorization read-back did not match the confirmed transaction.");
+      setManagedIssuerStatus(actual);
+      await checkRegistryAccess(walletAddress);
+    } catch (error: unknown) {
+      setAdminError(parseContractError(error));
+    } finally {
+      setAdminActionPending(false);
     }
   };
 
@@ -526,7 +599,7 @@ export default function IssuerPortal() {
               <span>🦊</span> Issuer Wallet Authorization
             </h3>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-              Only the authorized wallet configured on the smart contract can register certificates.
+              Any wallet may connect. Certificate issuance is available to issuer wallets approved by CertTrace.
             </p>
           </div>
 
@@ -551,7 +624,7 @@ export default function IssuerPortal() {
                   onClick={() => setWalletAddress(null)}
                   className="text-xs text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-300 py-1.5 px-2"
                 >
-                  Disconnect
+                  Hide
                 </button>
               </div>
             )}
@@ -581,7 +654,7 @@ export default function IssuerPortal() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           <div className="p-3 bg-zinc-50 dark:bg-zinc-950 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <span className="text-zinc-500 dark:text-zinc-400 block font-medium mb-1">
-              Smart Contract Deployment ({CONFIGURED_CONTRACT_VERSION.toUpperCase()} issuance):
+              Current CertTrace Registry:
             </span>
             {contractConfigured ? (
               <span className="font-mono text-zinc-800 dark:text-zinc-200 break-all select-all">
@@ -589,7 +662,7 @@ export default function IssuerPortal() {
               </span>
             ) : (
               <span className="text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1">
-                ⚠️ Not Configured (set the trusted {CONFIGURED_CONTRACT_VERSION.toUpperCase()} address)
+                ⚠️ Not Configured (set NEXT_PUBLIC_CONTRACT_ADDRESS)
               </span>
             )}
           </div>
@@ -616,16 +689,80 @@ export default function IssuerPortal() {
               <span className="text-zinc-500">Verifying authorization...</span>
             ) : isAuthorizedIssuer ? (
               <span className="text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
-                ✓ Authorized Issuer Wallet Verified
+                ✓ Issuer Status: Authorized
               </span>
             ) : (
-              <span className="text-red-600 dark:text-red-400 font-medium">
-                ✗ Unauthorized Wallet (Mismatch with Contract Issuer)
-              </span>
+              <div className="text-zinc-600 dark:text-zinc-300">
+                <span className="font-medium">Issuer Status: Not Authorized</span>
+                <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Certificate issuance is available to issuer wallets approved by CertTrace. Verification is available to everyone.
+                </p>
+              </div>
             )}
           </div>
         </div>
       </div>
+
+      {isAdmin && (
+        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5 shadow-sm space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Admin Issuer Management</h3>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              Authorize or remove issuer wallets. Each confirmed transaction is read back from the registry.
+            </p>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              value={managedIssuer}
+              onChange={(event) => {
+                setManagedIssuer(event.target.value);
+                setManagedIssuerStatus(null);
+                setAdminError(null);
+              }}
+              placeholder="0x… issuer wallet"
+              aria-label="Issuer Ethereum address"
+              className="flex-1 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-3 py-2.5 font-mono text-xs"
+            />
+            <button
+              type="button"
+              onClick={() => refreshManagedIssuer()}
+              disabled={adminActionPending}
+              className="rounded-xl border border-zinc-300 dark:border-zinc-700 px-3 py-2 text-xs font-medium disabled:opacity-40"
+            >
+              Check Status
+            </button>
+          </div>
+          {managedIssuerStatus !== null && (
+            <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+              Issuer Status: {managedIssuerStatus ? "Authorized" : "Not Authorized"}
+            </p>
+          )}
+          {adminError && <p className="text-xs text-red-600 dark:text-red-400">{adminError}</p>}
+          {adminTxHash && (
+            <a href={getExplorerTxUrl(adminTxHash)} target="_blank" rel="noopener noreferrer" className="block text-xs font-mono text-indigo-600 dark:text-indigo-400 underline break-all">
+              {adminTxHash} ↗
+            </a>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => handleIssuerManagement("authorize")}
+              disabled={adminActionPending || managedIssuerStatus !== false || !isCorrectNetwork}
+              className="rounded-xl bg-emerald-600 hover:bg-emerald-500 px-3 py-2.5 text-xs font-medium text-white disabled:opacity-40"
+            >
+              {adminActionPending ? "Transaction Pending…" : "Authorize Issuer"}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleIssuerManagement("remove")}
+              disabled={adminActionPending || managedIssuerStatus !== true || !isCorrectNetwork}
+              className="rounded-xl bg-red-700 hover:bg-red-600 px-3 py-2.5 text-xs font-medium text-white disabled:opacity-40"
+            >
+              {adminActionPending ? "Transaction Pending…" : "Remove Issuer"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Issuer Portal Card */}
       <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm">
@@ -666,7 +803,7 @@ export default function IssuerPortal() {
               ) : (
                 <div className="space-y-1">
                   <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                    Click to select or drag and drop your certificate PDF
+                    Click to select your certificate PDF
                   </p>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
                     Supports .pdf files up to 25 MB
@@ -849,7 +986,7 @@ export default function IssuerPortal() {
                 )}
                 {contractConfigured && (!walletAddress || !isCorrectNetwork || !isAuthorizedIssuer) && (
                   <p className="text-xs text-center text-zinc-500 dark:text-zinc-400">
-                    Connect an authorized issuer wallet on Sepolia to enable blockchain registration.
+                    Connect an authorized issuer wallet on Sepolia to enable blockchain registration. Unauthorized wallets remain connected normally.
                   </p>
                 )}
                 {contractConfigured && walletAddress && isAuthorizedIssuer && !state.userConfirmedSavedProof && (
@@ -872,8 +1009,8 @@ export default function IssuerPortal() {
                   <div>
                     <span className="text-zinc-500 dark:text-zinc-400">Timestamp: </span>
                     <span className="font-mono font-medium">
-                      {state.confirmedOnChainRecord?.timestamp
-                        ? new Date(state.confirmedOnChainRecord.timestamp * 1000).toLocaleString()
+                      {state.confirmedOnChainRecord?.issuedAt
+                        ? new Date(state.confirmedOnChainRecord.issuedAt * 1000).toLocaleString()
                         : "Confirmed"}
                     </span>
                   </div>
@@ -976,52 +1113,45 @@ export default function IssuerPortal() {
         </div>
       )}
 
-      {revocationSupported ? (
-        <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm space-y-4">
-          <div>
-            <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Revoke a Registered Credential</h3>
-            <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-              V2 only. Revocation is permanent and succeeds only after the Sepolia transaction confirms and the updated status is read back on-chain.
-            </p>
-          </div>
-          <input
-            value={revocationCredentialId}
-            onChange={(event) => setRevocationCredentialId(event.target.value)}
-            placeholder="0x… credential ID"
-            aria-label="Credential ID to revoke"
-            className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-3 py-2.5 font-mono text-xs"
-          />
-          {revocationError && <p className="text-xs text-red-600 dark:text-red-400">{revocationError}</p>}
-          {isSubmittingRevocation && (
-            <p className="text-xs text-amber-700 dark:text-amber-300">
-              {revocationTxHash ? "Transaction broadcast; waiting for confirmation…" : "Waiting for MetaMask submission…"}
-            </p>
-          )}
-          {revocationTxHash && (
-            <a href={getExplorerTxUrl(revocationTxHash)} target="_blank" rel="noopener noreferrer" className="block text-xs font-mono text-indigo-600 dark:text-indigo-400 underline break-all">
-              {revocationTxHash} ↗
-            </a>
-          )}
-          {revocationConfirmed && (
-            <p className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 text-xs font-semibold text-red-700 dark:text-red-300">
-              REVOKED — on-chain status confirmed at {new Date(revocationConfirmed.revokedAt * 1000).toLocaleString()}
-            </p>
-          )}
-          <button
-            type="button"
-            onClick={handleRevokeCredential}
-            disabled={isSubmittingRevocation || !walletAddress || !isCorrectNetwork || !isAuthorizedIssuer}
-            className="w-full bg-red-700 hover:bg-red-600 text-white font-medium py-2.5 px-4 rounded-xl text-sm disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {isSubmittingRevocation ? "Revocation Pending…" : "Submit revokeCredential()"}
-          </button>
+      <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-6 shadow-sm space-y-4">
+        <div>
+          <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Revoke a Registered Credential</h3>
+          <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+            Revocation is permanent. Only the wallet that originally issued the credential may revoke it; admin status or authorization for another issuer is not sufficient.
+          </p>
         </div>
-      ) : (
-        <div className="bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 text-xs text-zinc-600 dark:text-zinc-400">
-          <strong className="text-zinc-800 dark:text-zinc-200">Revocation status:</strong>{" "}
-          The configured Sepolia contract is CertTrace V1 and has no revocation function. A separately deployed V2 contract must be explicitly configured before real revocation controls can be enabled.
-        </div>
-      )}
+        <input
+          value={revocationCredentialId}
+          onChange={(event) => setRevocationCredentialId(event.target.value)}
+          placeholder="0x… credential ID"
+          aria-label="Credential ID to revoke"
+          className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-3 py-2.5 font-mono text-xs"
+        />
+        {revocationError && <p className="text-xs text-red-600 dark:text-red-400">{revocationError}</p>}
+        {isSubmittingRevocation && (
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            {revocationTxHash ? "Transaction broadcast; waiting for confirmation…" : "Waiting for MetaMask submission…"}
+          </p>
+        )}
+        {revocationTxHash && (
+          <a href={getExplorerTxUrl(revocationTxHash)} target="_blank" rel="noopener noreferrer" className="block text-xs font-mono text-indigo-600 dark:text-indigo-400 underline break-all">
+            {revocationTxHash} ↗
+          </a>
+        )}
+        {revocationConfirmed && (
+          <p className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 text-xs font-semibold text-red-700 dark:text-red-300">
+            REVOKED — on-chain status confirmed at {new Date(revocationConfirmed.revokedAt * 1000).toLocaleString()}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={handleRevokeCredential}
+          disabled={isSubmittingRevocation || !walletAddress || !isCorrectNetwork}
+          className="w-full bg-red-700 hover:bg-red-600 text-white font-medium py-2.5 px-4 rounded-xl text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {isSubmittingRevocation ? "Revocation Pending…" : "Submit revokeCredential()"}
+        </button>
+      </div>
     </div>
   );
 }

@@ -1,36 +1,35 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CertTrace web application
 
-## Getting Started
+This Next.js application provides one issuer workflow and one public verifier workflow for the current `CertTraceRegistry` deployment on Ethereum Sepolia.
 
-First, run the development server:
+## Configuration
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+Copy `.env.example` to `.env.local` and set the deployed registry address:
+
+```text
+NEXT_PUBLIC_CONTRACT_ADDRESS=0xd754993064d4bb81ff456b0EA6791CFa63569E7b
+NEXT_PUBLIC_APP_ORIGIN=https://certtrace-sih2026.vercel.app
+NEXT_PUBLIC_SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+There are no contract-version selectors or legacy routing variables. Proof files are accepted only when their `chainId` is Sepolia and their `contractAddress` exactly matches `NEXT_PUBLIC_CONTRACT_ADDRESS`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Workflows
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Any wallet can connect. The issuer portal displays a neutral `Not Authorized` state until the registry approves the wallet.
+- Authorized issuers hash exact PDF bytes locally, create a random credential ID and salt, download the proof, issue on-chain, and receive confirmation only after strict state read-back.
+- The admin wallet sees a small issuer-management panel for authorization and removal.
+- Original issuer wallets can permanently revoke their own credentials.
+- Public verification needs no MetaMask. It requires the PDF and proof JSON; a QR link only preloads the public credential ID.
+- QR URLs use only `/verify?id=<credentialId>` and contain no salt, proof, PDF, personal data, or contract-version hint.
 
-## Learn More
+The `CERTTRACE_V1` string remains the cryptographic commitment domain and is unrelated to historical contract product versions.
 
-To learn more about Next.js, take a look at the following resources:
+## Commands
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```shell
+npm test
+npm run lint
+npx tsc --noEmit
+npm run build
+```

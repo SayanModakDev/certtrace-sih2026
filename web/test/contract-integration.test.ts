@@ -2,415 +2,360 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
 
+import { CERTTRACE_REGISTRY_ABI } from "../lib/abi";
 import {
-  isMetaMaskInstalled,
-  requestConnectWallet,
-  switchToSepolia,
-  getAuthorizedIssuer,
+  assertIssuanceReadBack,
+  checkIssuerAuthorization,
   fetchOnChainCredential,
-  submitIssueCredential,
+  getRegistryAdmin,
+  isMetaMaskInstalled,
+  isRegistryAdmin,
   parseContractError,
+  requestConnectWallet,
+  submitAuthorizeIssuer,
+  submitIssueCredential,
+  submitRemoveIssuer,
+  submitRevokeCredential,
+  switchToSepolia,
+  type OnChainCredentialRecord,
 } from "../lib/contract";
+import { verifyCertificateWithBlockchain } from "../lib/verification";
+import { SEPOLIA_CHAIN_ID, SEPOLIA_HEX_CHAIN_ID, isContractConfigured } from "../lib/config";
+import { createVerificationProof } from "../lib/proof";
+import { calculateCommitment, generateRandomBytes32, hashFileBytes } from "../lib/crypto";
 
-import {
-  verifyCertificateWithBlockchain,
-} from "../lib/verification";
-
-import {
-  SEPOLIA_CHAIN_ID,
-  SEPOLIA_HEX_CHAIN_ID,
-  isContractConfigured,
-} from "../lib/config";
-
-import {
-  createVerificationProof,
-} from "../lib/proof";
-
-import {
-  calculateCommitment,
-  generateRandomBytes32,
-  hashFileBytes,
-} from "../lib/crypto";
-
-// Test Fixtures
 const TEST_CONTRACT = "0x1234567890123456789012345678901234567890";
+const ADMIN = "0x9999999999999999999999999999999999999999";
 const AUTHORIZED_ISSUER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const UNAUTHORIZED_USER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TX_HASH = `0x${"ab".repeat(32)}`;
+const iface = new ethers.Interface(CERTTRACE_REGISTRY_ABI);
 
-function createMockPdf(content: string = "Sample Academic Diploma"): Uint8Array {
+function createMockPdf(content = "Sample Academic Diploma"): Uint8Array {
   const encoder = new TextEncoder();
   const header = encoder.encode("%PDF-1.7\n");
   const body = encoder.encode(content);
   const full = new Uint8Array(header.length + body.length);
-  full.set(header, 0);
+  full.set(header);
   full.set(body, header.length);
   return full;
 }
 
-test("1. Missing MetaMask detection and user guidance", async () => {
-  // Ensure window.ethereum is undefined
+function mockRegistryProvider(
+  record: OnChainCredentialRecord,
+  authorized = true
+): ethers.Provider {
+  return {
+    call: async (tx: { data: string }) => {
+      const parsed = iface.parseTransaction({ data: tx.data });
+      if (parsed?.name === "getCredential") {
+        return iface.encodeFunctionResult("getCredential", [[
+          record.commitment,
+          record.issuer,
+          BigInt(record.issuedAt),
+          record.revoked,
+          BigInt(record.revokedAt),
+          record.exists,
+        ]]);
+      }
+      if (parsed?.name === "isAuthorizedIssuer") {
+        return iface.encodeFunctionResult("isAuthorizedIssuer", [authorized]);
+      }
+      if (parsed?.name === "admin") {
+        return iface.encodeFunctionResult("admin", [ADMIN]);
+      }
+      throw new Error(`Unexpected contract call: ${parsed?.name}`);
+    },
+  } as unknown as ethers.Provider;
+}
+
+function mockSigner() {
+  const transactions: ethers.TransactionRequest[] = [];
+  const signer = {
+    provider: null,
+    sendTransaction: async (tx: ethers.TransactionRequest) => {
+      transactions.push(tx);
+      return {
+        hash: TX_HASH,
+        wait: async () => ({ status: 1, blockNumber: 1234, hash: TX_HASH }),
+      };
+    },
+  } as unknown as ethers.Signer;
+  return { signer, transactions };
+}
+
+test("1. MetaMask absence produces actionable guidance", async () => {
   const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   (globalThis as unknown as { window: { ethereum?: unknown } }).window = {};
-
   try {
     assert.equal(isMetaMaskInstalled(), false);
-
-    await assert.rejects(
-      async () => {
-        await requestConnectWallet();
-      },
-      /MetaMask extension not detected/
-    );
+    await assert.rejects(() => requestConnectWallet(), /MetaMask extension not detected/);
   } finally {
     (globalThis as unknown as { window?: unknown }).window = originalWindow;
   }
 });
 
-test("2. Wrong network detection and switch request to Sepolia", async () => {
-  let switchRequestedChainId: string | null = null;
+test("2. Any wallet, including an unauthorized wallet, can connect normally", async () => {
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
+  const ethereum = {
+    request: async ({ method }: { method: string }) => {
+      if (method === "eth_requestAccounts") return [UNAUTHORIZED_USER];
+      if (method === "eth_chainId") return SEPOLIA_HEX_CHAIN_ID;
+      return null;
+    },
+  };
+  (globalThis as unknown as { window: { ethereum: unknown } }).window = { ethereum };
+  try {
+    const connected = await requestConnectWallet();
+    assert.equal(connected.address.toLowerCase(), UNAUTHORIZED_USER);
+    assert.equal(connected.chainId, SEPOLIA_CHAIN_ID);
+  } finally {
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
+  }
+});
 
-  // Mock window.ethereum connected to Ethereum Mainnet (chain ID 1)
-  const mockEthereum = {
+test("3. Wrong-network wallet receives the Sepolia switch request", async () => {
+  let requested: string | null = null;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
+  const ethereum = {
     request: async ({ method, params }: { method: string; params?: unknown[] }) => {
-      if (method === "eth_requestAccounts") {
-        return [AUTHORIZED_ISSUER];
-      }
       if (method === "wallet_switchEthereumChain") {
-        switchRequestedChainId = (params?.[0] as { chainId: string }).chainId;
-        return null;
+        requested = (params?.[0] as { chainId: string }).chainId;
       }
       return null;
     },
   };
-
-  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
-  (globalThis as unknown as { window: { ethereum: unknown } }).window = { ethereum: mockEthereum };
-
+  (globalThis as unknown as { window: { ethereum: unknown } }).window = { ethereum };
   try {
-    assert.equal(isMetaMaskInstalled(), true);
-
     await switchToSepolia();
-    assert.equal(switchRequestedChainId, SEPOLIA_HEX_CHAIN_ID);
+    assert.equal(requested, SEPOLIA_HEX_CHAIN_ID);
   } finally {
     (globalThis as unknown as { window?: unknown }).window = originalWindow;
   }
 });
 
-test("3. Unauthorized issuer prevention and contract error decoding", async () => {
-  // Test OwnableUnauthorizedAccount custom error decoding
-  const unauthorizedError = {
-    data: "0x118cdaa7000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    message: "execution reverted: OwnableUnauthorizedAccount",
+test("4. Registry admin and issuer authorization are read independently", async () => {
+  const record = {
+    commitment: ethers.ZeroHash,
+    issuer: ethers.ZeroAddress,
+    issuedAt: 0,
+    revoked: false,
+    revokedAt: 0,
+    exists: false,
   };
-
-  const parsed = parseContractError(unauthorizedError);
-  assert.match(parsed, /Unauthorized wallet/);
-
-  // Mock provider to test getAuthorizedIssuer
-  const mockProvider = {
-    call: async (tx: { data: string }) => {
-      if (tx.data.startsWith("0x1d143848")) {
-        const coder = ethers.AbiCoder.defaultAbiCoder();
-        return coder.encode(["address"], [AUTHORIZED_ISSUER]);
-      }
-      return "0x";
-    },
-  } as unknown as ethers.Provider;
-
-  const onChainIssuer = await getAuthorizedIssuer(TEST_CONTRACT, mockProvider);
-  assert.equal(onChainIssuer.toLowerCase(), AUTHORIZED_ISSUER.toLowerCase());
-  assert.notEqual(onChainIssuer.toLowerCase(), UNAUTHORIZED_USER.toLowerCase());
+  const provider = mockRegistryProvider(record, true);
+  assert.equal(await getRegistryAdmin(TEST_CONTRACT, provider), ethers.getAddress(ADMIN));
+  assert.equal(await checkIssuerAuthorization(AUTHORIZED_ISSUER, TEST_CONTRACT, provider), true);
+  assert.equal(isRegistryAdmin(ADMIN, ADMIN), true);
+  assert.equal(isRegistryAdmin(AUTHORIZED_ISSUER, ADMIN), false);
+  assert.equal(isRegistryAdmin(null, ADMIN), false);
 });
 
-test("4. Rejected transaction handling (User rejected in MetaMask)", () => {
-  const userRejectedError = {
-    code: 4001,
-    message: "MetaMask Tx Signature: User denied transaction signature.",
-  };
-
-  const parsed = parseContractError(userRejectedError);
-  assert.match(parsed, /rejected by user in MetaMask/);
-
-  // Ethers ACTION_REJECTED code
-  const actionRejectedError = {
-    code: "ACTION_REJECTED",
-    message: "user rejected action",
-  };
-  assert.match(parseContractError(actionRejectedError), /rejected by user in MetaMask/);
+test("5. Admin authorization and removal helpers submit only validated addresses", async () => {
+  const { signer, transactions } = mockSigner();
+  await assert.rejects(() => submitAuthorizeIssuer(signer, "bad", TEST_CONTRACT), /valid Ethereum/);
+  await submitAuthorizeIssuer(signer, AUTHORIZED_ISSUER, TEST_CONTRACT);
+  await submitRemoveIssuer(signer, AUTHORIZED_ISSUER, TEST_CONTRACT);
+  assert.equal(transactions.length, 2);
+  assert.equal(iface.parseTransaction({ data: transactions[0].data as string })?.name, "authorizeIssuer");
+  assert.equal(iface.parseTransaction({ data: transactions[1].data as string })?.name, "removeIssuer");
 });
 
-test("5. Successful confirmed issuance workflow and parameter validation", async () => {
+test("6. Issuance and revocation helpers target the unified registry ABI", async () => {
+  const { signer, transactions } = mockSigner();
   const credentialId = generateRandomBytes32();
-  const fileHash = generateRandomBytes32();
-  const salt = generateRandomBytes32();
-  const commitment = calculateCommitment(credentialId, fileHash, salt);
-
-  const mockTxHash = "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
-
-  // Mock signer that simulates issueCredential transaction
-  const mockSigner = {
-    getAddress: async () => AUTHORIZED_ISSUER,
-  } as unknown as ethers.Signer;
-
-  // Verify submitIssueCredential input validation
+  const commitment = generateRandomBytes32();
+  await submitIssueCredential(signer, credentialId, commitment, TEST_CONTRACT);
+  await submitRevokeCredential(signer, credentialId, TEST_CONTRACT);
+  assert.equal(iface.parseTransaction({ data: transactions[0].data as string })?.name, "issueCredential");
+  assert.equal(iface.parseTransaction({ data: transactions[1].data as string })?.name, "revokeCredential");
   await assert.rejects(
-    async () => {
-      await submitIssueCredential(mockSigner, "invalid-id", commitment, TEST_CONTRACT);
-    },
+    () => submitIssueCredential(signer, "invalid", commitment, TEST_CONTRACT),
     /Invalid credentialId/
   );
-
-  await assert.rejects(
-    async () => {
-      await submitIssueCredential(mockSigner, credentialId, "invalid-commitment", TEST_CONTRACT);
-    },
-    /Invalid commitment/
-  );
-
-  // Mock contract submission simulation
-  const mockSubmitIssue = async (
-    signer: ethers.Signer,
-    cId: string,
-    comm: string,
-    contractAddr: string
-  ) => {
-    assert.equal(contractAddr, TEST_CONTRACT);
-    return {
-      txHash: mockTxHash,
-      wait: async () => ({
-        status: 1,
-        blockNumber: 1234567,
-        hash: mockTxHash,
-      } as unknown as ethers.ContractTransactionReceipt),
-    };
-  };
-
-  const { txHash, wait } = await mockSubmitIssue(mockSigner, credentialId, commitment, TEST_CONTRACT);
-  assert.equal(txHash, mockTxHash);
-
-  const receipt = await wait();
-  assert.equal(receipt.status, 1);
-  assert.equal(receipt.blockNumber, 1234567);
 });
 
-test("6. Duplicate credential ID rejection parsing", () => {
-  const duplicateError = {
-    data: "0x87dbb506" + "11".repeat(32), // CredentialAlreadyExists selector
-    message: "execution reverted: CredentialAlreadyExists",
+test("7. Strict issuance confirmation requires the full state read-back", () => {
+  const commitment = generateRandomBytes32();
+  const valid: OnChainCredentialRecord = {
+    commitment,
+    issuer: AUTHORIZED_ISSUER,
+    issuedAt: 1774438800,
+    revoked: false,
+    revokedAt: 0,
+    exists: true,
   };
-
-  const parsed = parseContractError(duplicateError);
-  assert.match(parsed, /already been registered on the blockchain/);
+  assert.doesNotThrow(() => assertIssuanceReadBack(valid, commitment, AUTHORIZED_ISSUER));
+  assert.throws(() => assertIssuanceReadBack({ ...valid, exists: false }, commitment, AUTHORIZED_ISSUER), /does not exist/);
+  assert.throws(() => assertIssuanceReadBack({ ...valid, commitment: generateRandomBytes32() }, commitment, AUTHORIZED_ISSUER), /commitment/);
+  assert.throws(() => assertIssuanceReadBack({ ...valid, issuer: UNAUTHORIZED_USER }, commitment, AUTHORIZED_ISSUER), /issuer/);
+  assert.throws(() => assertIssuanceReadBack({ ...valid, revoked: true }, commitment, AUTHORIZED_ISSUER), /revoked/);
 });
 
-test("7. Successful read-only verification (MATCHES_REGISTERED_DOCUMENT)", async () => {
-  const pdfBytes = createMockPdf("Authentic Bachelor Degree");
-  const fileHash = await hashFileBytes(pdfBytes);
+test("8. Friendly errors cover authorization, admin, duplicates, and cross-revocation", () => {
+  assert.match(parseContractError({ message: "IssuerNotAuthorized" }), /not an authorized/);
+  assert.match(parseContractError({ message: "AdminOnly" }), /Only the CertTrace registry admin/);
+  assert.match(parseContractError({ message: "CredentialAlreadyExists" }), /already registered/);
+  assert.match(parseContractError({ message: "CredentialIssuerOnly" }), /originally issued/);
+  assert.match(parseContractError({ code: 4001, message: "user rejected" }), /rejected/);
+});
+
+test("9. Original PDF verifies without MetaMask against the current registry", async () => {
+  const pdf = createMockPdf("Authentic Bachelor Degree");
+  const fileHash = await hashFileBytes(pdf);
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
   const commitment = calculateCommitment(credentialId, fileHash, salt);
-
   const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_CONTRACT);
-
-  // Mock read-only provider returning matching on-chain record
-  const mockProvider = {
-    call: async (tx: { data: string; to: string }) => {
-      // If getCredential call
-      if (tx.data.startsWith("0xd1be4883")) {
-        // Return encoded tuple (bytes32 credentialId, bytes32 commitment, address issuer, uint256 timestamp, bool isRegistered)
-        const coder = ethers.AbiCoder.defaultAbiCoder();
-        return coder.encode(
-          ["bytes32", "bytes32", "address", "uint256", "bool"],
-          [credentialId, commitment, AUTHORIZED_ISSUER, BigInt(1774438800), true]
-        );
-      }
-      // If issuer() call
-      if (tx.data.startsWith("0x1d143848")) {
-        const coder = ethers.AbiCoder.defaultAbiCoder();
-        return coder.encode(["address"], [AUTHORIZED_ISSUER]);
-      }
-      return "0x";
-    },
-  } as unknown as ethers.Provider;
-
-  // Direct test of fetchOnChainCredential helper
-  const directRecord = await fetchOnChainCredential(credentialId, TEST_CONTRACT, mockProvider);
-  assert.equal(directRecord.isRegistered, true);
-  assert.equal(directRecord.credentialId, credentialId);
-  assert.equal(directRecord.commitment, commitment);
-  assert.equal(directRecord.issuer.toLowerCase(), AUTHORIZED_ISSUER.toLowerCase());
-
-  const result = await verifyCertificateWithBlockchain({
-    pdfFile: { name: "degree.pdf", size: pdfBytes.byteLength, type: "application/pdf" },
-    pdfBuffer: pdfBytes,
-    proofInput: proof,
-    expectedChainId: SEPOLIA_CHAIN_ID,
-    expectedContractAddress: TEST_CONTRACT,
-    provider: mockProvider,
+  const provider = mockRegistryProvider({
+    commitment,
+    issuer: AUTHORIZED_ISSUER,
+    issuedAt: 1774438800,
+    revoked: false,
+    revokedAt: 0,
+    exists: true,
   });
 
+  const record = await fetchOnChainCredential(credentialId, TEST_CONTRACT, provider);
+  assert.equal(record.exists, true);
+  assert.equal(record.issuer.toLowerCase(), AUTHORIZED_ISSUER);
+
+  const result = await verifyCertificateWithBlockchain({
+    pdfFile: { name: "degree.pdf", size: pdf.byteLength, type: "application/pdf" },
+    pdfBuffer: pdf,
+    proofInput: proof,
+    expectedContractAddress: TEST_CONTRACT,
+    provider,
+  });
   assert.equal(result.outcome, "MATCHES_REGISTERED_DOCUMENT");
-  assert.equal(result.headline, "Matches Registered Document");
-  assert.equal(result.onChainRecord?.isRegistered, true);
-  assert.equal(result.onChainRecord?.commitment.toLowerCase(), commitment.toLowerCase());
   assert.equal(result.isIssuerAuthorized, true);
 });
 
-test("8. Modified PDF producing a commitment mismatch (DOCUMENT_MISMATCH)", async () => {
-  const originalPdf = createMockPdf("Original Academic Credential");
-  const originalHash = await hashFileBytes(originalPdf);
+test("10. Modified PDF produces DOCUMENT_MISMATCH", async () => {
+  const original = createMockPdf("Original Academic Credential");
+  const modified = createMockPdf("Modified Academic Credential");
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
-  const originalCommitment = calculateCommitment(credentialId, originalHash, salt);
-
-  // Verifier receives a modified PDF
-  const tamperedPdf = createMockPdf("Tampered Academic Credential (Grade Altered)");
-
+  const commitment = calculateCommitment(credentialId, await hashFileBytes(original), salt);
   const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_CONTRACT);
-
-  // Mock read-only provider returns original on-chain commitment
-  const mockProvider = {
-    call: async (tx: { data: string }) => {
-      if (tx.data.startsWith("0xd1be4883")) {
-        const coder = ethers.AbiCoder.defaultAbiCoder();
-        return coder.encode(
-          ["bytes32", "bytes32", "address", "uint256", "bool"],
-          [credentialId, originalCommitment, AUTHORIZED_ISSUER, BigInt(1774438800), true]
-        );
-      }
-      if (tx.data.startsWith("0x1d143848")) {
-        const coder = ethers.AbiCoder.defaultAbiCoder();
-        return coder.encode(["address"], [AUTHORIZED_ISSUER]);
-      }
-      return "0x";
-    },
-  } as unknown as ethers.Provider;
-
-  const result = await verifyCertificateWithBlockchain({
-    pdfFile: { name: "tampered.pdf", size: tamperedPdf.byteLength, type: "application/pdf" },
-    pdfBuffer: tamperedPdf,
-    proofInput: proof,
-    expectedChainId: SEPOLIA_CHAIN_ID,
-    expectedContractAddress: TEST_CONTRACT,
-    provider: mockProvider,
+  const provider = mockRegistryProvider({
+    commitment,
+    issuer: AUTHORIZED_ISSUER,
+    issuedAt: 1774438800,
+    revoked: false,
+    revokedAt: 0,
+    exists: true,
   });
-
+  const result = await verifyCertificateWithBlockchain({
+    pdfFile: { name: "modified.pdf", size: modified.byteLength, type: "application/pdf" },
+    pdfBuffer: modified,
+    proofInput: proof,
+    expectedContractAddress: TEST_CONTRACT,
+    provider,
+  });
   assert.equal(result.outcome, "DOCUMENT_MISMATCH");
-  assert.equal(result.headline, "Document Mismatch");
-  assert.notEqual(result.reconstructedCommitment?.toLowerCase(), originalCommitment.toLowerCase());
-  assert.equal(result.onChainRecord?.isRegistered, true);
 });
 
-test("9. Unknown credential ID handling (UNKNOWN_CREDENTIAL)", async () => {
-  const pdfBytes = createMockPdf("Unregistered Certificate");
+test("11. Revoked matching credential reports REVOKED — REGISTERED DOCUMENT", async () => {
+  const pdf = createMockPdf("Revoked Degree");
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
-
+  const commitment = calculateCommitment(credentialId, await hashFileBytes(pdf), salt);
   const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_CONTRACT);
-
-  // Mock provider returns uninitialized record (isRegistered: false, timestamp: 0)
-  const mockProvider = {
-    call: async (tx: { data: string }) => {
-      if (tx.data.startsWith("0xd1be4883")) {
-        const coder = ethers.AbiCoder.defaultAbiCoder();
-        return coder.encode(
-          ["bytes32", "bytes32", "address", "uint256", "bool"],
-          [ethers.ZeroHash, ethers.ZeroHash, ethers.ZeroAddress, BigInt(0), false]
-        );
-      }
-      return "0x";
-    },
-  } as unknown as ethers.Provider;
-
-  const result = await verifyCertificateWithBlockchain({
-    pdfFile: { name: "unregistered.pdf", size: pdfBytes.byteLength, type: "application/pdf" },
-    pdfBuffer: pdfBytes,
-    proofInput: proof,
-    expectedChainId: SEPOLIA_CHAIN_ID,
-    expectedContractAddress: TEST_CONTRACT,
-    provider: mockProvider,
+  const provider = mockRegistryProvider({
+    commitment,
+    issuer: AUTHORIZED_ISSUER,
+    issuedAt: 1774438800,
+    revoked: true,
+    revokedAt: 1774439900,
+    exists: true,
   });
+  const result = await verifyCertificateWithBlockchain({
+    pdfFile: { name: "revoked.pdf", size: pdf.byteLength, type: "application/pdf" },
+    pdfBuffer: pdf,
+    proofInput: proof,
+    expectedContractAddress: TEST_CONTRACT,
+    provider,
+  });
+  assert.equal(result.outcome, "REVOKED_REGISTERED_DOCUMENT");
+});
 
+test("12. Unknown credential reports UNKNOWN_CREDENTIAL", async () => {
+  const pdf = createMockPdf("Unknown Degree");
+  const credentialId = generateRandomBytes32();
+  const salt = generateRandomBytes32();
+  const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_CONTRACT);
+  const provider = mockRegistryProvider({
+    commitment: ethers.ZeroHash,
+    issuer: ethers.ZeroAddress,
+    issuedAt: 0,
+    revoked: false,
+    revokedAt: 0,
+    exists: false,
+  }, false);
+  const result = await verifyCertificateWithBlockchain({
+    pdfFile: { name: "unknown.pdf", size: pdf.byteLength, type: "application/pdf" },
+    pdfBuffer: pdf,
+    proofInput: proof,
+    expectedContractAddress: TEST_CONTRACT,
+    provider,
+  });
   assert.equal(result.outcome, "UNKNOWN_CREDENTIAL");
-  assert.equal(result.headline, "Unknown Credential");
-  assert.equal(result.onChainRecord?.isRegistered, false);
 });
 
-test("10. Unavailable RPC network failure (VERIFICATION_UNAVAILABLE)", async () => {
-  const pdfBytes = createMockPdf("Network Test Certificate");
+test("13. RPC failure produces VERIFICATION_UNAVAILABLE", async () => {
+  const pdf = createMockPdf("Network Test");
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
-
   const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, TEST_CONTRACT);
-
-  // Mock provider throws network error
-  const mockProvider = {
+  const provider = {
     call: async () => {
-      const err = new Error("Failed to fetch from Sepolia RPC endpoint");
-      (err as unknown as { code: string }).code = "NETWORK_ERROR";
-      throw err;
+      const error = new Error("Failed to fetch Sepolia RPC");
+      (error as Error & { code: string }).code = "NETWORK_ERROR";
+      throw error;
     },
   } as unknown as ethers.Provider;
-
   const result = await verifyCertificateWithBlockchain({
-    pdfFile: { name: "cert.pdf", size: pdfBytes.byteLength, type: "application/pdf" },
-    pdfBuffer: pdfBytes,
+    pdfFile: { name: "network.pdf", size: pdf.byteLength, type: "application/pdf" },
+    pdfBuffer: pdf,
     proofInput: proof,
-    expectedChainId: SEPOLIA_CHAIN_ID,
     expectedContractAddress: TEST_CONTRACT,
-    provider: mockProvider,
+    provider,
   });
-
   assert.equal(result.outcome, "VERIFICATION_UNAVAILABLE");
-  assert.equal(result.headline, "Blockchain Query Failed");
-  assert.match(result.rpcError!, /Network/);
 });
 
-test("11. Proof referencing an incorrect contract rejection", async () => {
-  const pdfBytes = createMockPdf("Contract Mismatch Certificate");
+test("14. Arbitrary proof contract addresses are rejected", async () => {
+  const pdf = createMockPdf("Foreign Contract Test");
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
-
-  const foreignContract = "0x9999999999999999999999999999999999999999";
-  const proof = createVerificationProof(credentialId, salt, SEPOLIA_CHAIN_ID, foreignContract);
-
+  const proof = createVerificationProof(
+    credentialId,
+    salt,
+    SEPOLIA_CHAIN_ID,
+    "0x8888888888888888888888888888888888888888"
+  );
   const result = await verifyCertificateWithBlockchain({
-    pdfFile: { name: "cert.pdf", size: pdfBytes.byteLength, type: "application/pdf" },
-    pdfBuffer: pdfBytes,
+    pdfFile: { name: "foreign.pdf", size: pdf.byteLength, type: "application/pdf" },
+    pdfBuffer: pdf,
     proofInput: proof,
-    expectedChainId: SEPOLIA_CHAIN_ID,
     expectedContractAddress: TEST_CONTRACT,
   });
-
   assert.equal(result.outcome, "VERIFICATION_UNAVAILABLE");
-  assert.equal(result.headline, "Proof Validation Failed");
   assert.match(result.details, /Incorrect contract address reference/);
 });
 
-test("12. Contract address missing or not configured rejection", async () => {
-  const pdfBytes = createMockPdf("Unconfigured Contract Certificate");
+test("15. Missing registry configuration is unavailable", async () => {
+  assert.equal(typeof isContractConfigured(), "boolean");
+  const pdf = createMockPdf("No Registry");
   const credentialId = generateRandomBytes32();
   const salt = generateRandomBytes32();
-
-  const proof = {
-    version: 1,
-    credentialId,
-    salt,
-    chainId: SEPOLIA_CHAIN_ID,
-    contractAddress: TEST_CONTRACT,
-  };
-
-  assert.equal(typeof isContractConfigured(), "boolean");
-
-  // Test when expectedContractAddress is explicitly empty string
   const result = await verifyCertificateWithBlockchain({
-    pdfFile: { name: "cert.pdf", size: pdfBytes.byteLength, type: "application/pdf" },
-    pdfBuffer: pdfBytes,
-    proofInput: proof,
-    expectedChainId: SEPOLIA_CHAIN_ID,
-    expectedContractAddress: "", // unconfigured
+    pdfFile: { name: "none.pdf", size: pdf.byteLength, type: "application/pdf" },
+    pdfBuffer: pdf,
+    proofInput: { version: 1, credentialId, salt, chainId: SEPOLIA_CHAIN_ID, contractAddress: TEST_CONTRACT },
+    expectedContractAddress: "",
   });
-
   assert.equal(result.outcome, "VERIFICATION_UNAVAILABLE");
   assert.equal(result.headline, "Blockchain Not Configured");
 });

@@ -1,5 +1,5 @@
 import QRCode from "qrcode";
-import { CONFIGURED_PUBLIC_APP_ORIGIN, ContractVersion } from "./config";
+import { CONFIGURED_PUBLIC_APP_ORIGIN } from "./config";
 import { isValidBytes32 } from "./crypto";
 
 const VERIFY_PATH = "/verify";
@@ -24,8 +24,7 @@ function normalizePublicOrigin(origin: string): string {
  */
 export function createVerificationUrl(
   credentialId: string,
-  publicOrigin?: string,
-  contractVersion: ContractVersion = "v1"
+  publicOrigin?: string
 ): string {
   if (!isValidBytes32(credentialId)) {
     throw new Error("Cannot create verification link: invalid credential ID");
@@ -42,13 +41,7 @@ export function createVerificationUrl(
 
   const url = new URL(VERIFY_PATH, normalizePublicOrigin(candidateOrigin));
   url.searchParams.set("id", credentialId.toLowerCase());
-  if (contractVersion === "v2") url.searchParams.set("version", "v2");
   return url.toString();
-}
-
-export function parseContractVersionHint(value: unknown): ContractVersion | null {
-  if (value === undefined || value === null || value === "" || value === "v1") return "v1";
-  return value === "v2" ? "v2" : null;
 }
 
 /** Returns a valid public credential ID from a QR/query value, or null. */

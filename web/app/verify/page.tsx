@@ -5,11 +5,10 @@ import { SEPOLIA_CHAIN_ID } from "../../lib/config";
 export default async function VerifyPage({
   searchParams,
 }: {
-  searchParams: Promise<{ id?: string | string[]; version?: string | string[] }>;
+  searchParams: Promise<{ id?: string | string[] }>;
 }) {
   const query = await searchParams;
   const credentialId = typeof query.id === "string" ? query.id : null;
-  const contractVersion = typeof query.version === "string" ? query.version : null;
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col">
@@ -25,13 +24,13 @@ export default async function VerifyPage({
             </span>
           </Link>
           <div className="text-xs font-mono bg-zinc-100 dark:bg-zinc-800/70 border border-zinc-200 dark:border-zinc-700/60 px-3 py-1.5 rounded-xl">
-            Sepolia (ID: {SEPOLIA_CHAIN_ID}) · Trusted V1/V2 verifier
+            Sepolia (ID: {SEPOLIA_CHAIN_ID}) · CertTrace Registry
           </div>
         </div>
       </header>
 
       <main className="max-w-4xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-12 flex-1">
-        <VerifierPortal initialCredentialId={credentialId} initialContractVersion={contractVersion} />
+        <VerifierPortal initialCredentialId={credentialId} />
       </main>
 
       <footer className="border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 py-5 text-center text-xs text-zinc-500 dark:text-zinc-400">
