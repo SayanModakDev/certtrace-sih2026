@@ -20,7 +20,7 @@
   · <strong><a href="#architecture">Architecture</a></strong>
 </p>
 
-<p>Developed by <strong>BWU SolveArc</strong></p>
+<p>Developed by <strong>SolveArc BWU</strong></p>
 
 </div>
 
@@ -360,7 +360,7 @@ Never commit `.env.local`, private keys, recovery phrases, keystores, passwords,
 
 ## Team
 
-CertTrace is developed by **BWU SolveArc** for Smart India Hackathon 2026.
+CertTrace is developed by **SolveArc BWU** for Smart India Hackathon 2026.
 
 ## License
 
