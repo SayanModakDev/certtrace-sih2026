@@ -100,7 +100,7 @@ export default function Home() {
               CertTrace — Student Innovation (SIH26194)
             </p>
             <p className="mt-0.5">
-              Developed by BWU SolveArc for Smart India Hackathon 2026.
+              Developed by SolveArc BWU for Smart India Hackathon 2026.
             </p>
           </div>
           <div className="text-center sm:text-right space-y-0.5">
